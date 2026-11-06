@@ -7,18 +7,18 @@ SAM3DBodyで画像内の人物の姿勢を推定し、OpenPose互換の `POSE_KE
 ## ノード
 
 - `SAM3D Body OpenPose Analyze`
-  - 必須入力: `pose_image`。任意入力: `body_shape_image`（1枚）、`body_shape_images`（複数枚）、`device`、`auto_head_proportion`、`person_threshold`。
+  - 必須入力: `pose_image`。任意入力: `body_shape_images`（単体画像・画像バッチ・Append出力）、`device`、`auto_head_proportion`、`person_threshold`。
   - 出力: `pose_keypoint`、`body_shape_keypoint`、`debug_person_crops`。
   - SAM3.1で人物ごとのbboxとマスクを取得し、その範囲でSAM3DBodyが姿勢を推定します。頭身調整には内部で顔の大きさを測りますが、出力画像に顔の詳細な点は描きません。
-  - 複数人は検出されたbboxの左上順に並び、体形リファレンスもその順に割り当てられます。`body_shape_image` と `body_shape_images` の両方を接続した場合は前者が先です。足りない・推定に失敗したリファレンスには、その人物のポーズ画像の体形を使います。余ったリファレンスは使いません。
+  - 複数人は検出されたbboxの左上順に並び、体形リファレンスもその順に割り当てられます。足りない・推定に失敗したリファレンスには、その人物のポーズ画像の体形を使います。余ったリファレンスは使いません。
   - `auto_head_proportion` を有効にして体形画像を接続すると、両画像で測った顔幅と胴体長の比率を人物ごとに反映します。ミニキャラのリファレンスでは胴体や手足を短くし、頭を元の最大2倍まで大きくします。顔の向きと表情はポーズ画像から引き継ぎます。顔幅を測れない場合は胴体長を基準に正規化します。
 - `SAM3D Body OpenPose Video Analyze`
-  - 動画読み込みノードから、フレーム順の `IMAGE` バッチを `pose_image` に接続します。`body_shape_image` と `body_shape_images` は静止画版と同様に使えます。出力の2つのキーポイントを Render に接続すると、フレーム順の OpenPose 画像バッチが得られます。動画ファイルへの保存には、別途動画保存ノードを使います。
+  - 動画読み込みノードから、フレーム順の `IMAGE` バッチを `pose_image` に接続します。`body_shape_images` は静止画版と同様に使えます。出力の2つのキーポイントを Render に接続すると、フレーム順の OpenPose 画像バッチが得られます。動画ファイルへの保存には、別途動画保存ノードを使います。
   - 標準の `sam31_video` はComfyUI内蔵のSAM3.1動画追跡を使用します。最初に現れた人物からbboxの左上順に追跡IDと体形リファレンスを割り当て、その後は追跡マスクのIDを維持します。途中から現れた人物には次の未使用リファレンスが割り当てられます。検出できないフレームは空の骨格として出力します。`max_tracked_people` は追跡人数の上限、`detect_interval` は新しい人物を探す間隔です。
   - 必要ならComfyUI標準の `Run SAM3 Video Track` 出力を任意入力 `track_data` に接続できます。初期マスクや追跡プレビューを使う場合に便利です。この入力がある場合は、その追跡結果を優先します。`tracking_mode=frame_matching` では以前の位置・色による照合を使い、`max_missing_frames` はこのモードでのみ有効です。
   - SAM3.1でも、急なカット、似た人物、長い遮蔽でIDが入れ替わる可能性があります。長い動画はメモリ使用量と処理時間を考慮して短いバッチに分けてください。バッチを分けると追跡IDはリセットされます。
 - `SAM3D Body Shape Images (Append)`
-  - `body_shape_image` に画像を接続します。前段のAppendノードの `body_shape_images` を次の同名入力につなぐと、画像を1枚ずつ追加できます。必要な人数分つないだ後、最後の出力をAnalyzeの `body_shape_images` に接続してください。画像バッチはバッチ内の順番で追加されます。
+  - Appendノードの `body_shape_image` に追加する画像を接続します。前段のAppendノードの `body_shape_images` を次の同名入力につなぐと、画像を1枚ずつ追加できます。必要な人数分つないだ後、最後の出力をAnalyzeの `body_shape_images` に接続してください。画像バッチはバッチ内の順番で追加されます。
 - `SAM3D Body OpenPose Render`
   - 必須入力: `pose_keypoint`。任意入力: `body_shape_keypoint`。
   - 出力: OpenPose画像。体形リファレンスを接続した場合は、人物ごとに比率を適用して描画します。
@@ -27,7 +27,7 @@ SAM3DBodyで画像内の人物の姿勢を推定し、OpenPose互換の `POSE_KE
 
 ## ワークフローと画像例
 
-基本的な使い方は [`workflows/sam3d_body_openpose_example.json`](workflows/sam3d_body_openpose_example.json) をComfyUIで開き、`Load Image` で入力画像を選択して実行します。Analyze → Render → Save Image の順に処理します。体形画像を1枚使う場合は別の `Load Image` をAnalyzeの `body_shape_image` につなぎます。複数枚ならAppendノードを人物の順につなぎ、最後の出力をAnalyzeの `body_shape_images` へ接続します。Analyzeの `body_shape_keypoint` 出力をRenderの同名入力につないでください。
+基本的な使い方は [`workflows/sam3d_body_openpose_example.json`](workflows/sam3d_body_openpose_example.json) をComfyUIで開き、`Load Image` で入力画像を選択して実行します。Analyze → Render → Save Image の順に処理します。体形画像を1枚使う場合は別の `Load Image` をAnalyzeの `body_shape_images` につなぎます。複数枚ならAppendノードを人物の順につなぎ、最後の出力をAnalyzeの `body_shape_images` へ接続します。Analyzeの `body_shape_keypoint` 出力をRenderの同名入力につないでください。
 
 ### ポーズ推論の例
 

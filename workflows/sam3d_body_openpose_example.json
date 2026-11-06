@@ -66,9 +66,9 @@
           "link": 1
         },
         {
-          "name": "body_shape_image",
+          "name": "body_shape_images",
           "shape": 7,
-          "type": "IMAGE",
+          "type": "IMAGE,SAM3DBODY_SHAPE_IMAGES",
           "link": null
         }
       ],

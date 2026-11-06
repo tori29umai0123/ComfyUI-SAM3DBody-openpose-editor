@@ -488,15 +488,9 @@
           "link": 1
         },
         {
-          "name": "body_shape_image",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": null
-        },
-        {
           "name": "body_shape_images",
           "shape": 7,
-          "type": "SAM3DBODY_SHAPE_IMAGES",
+          "type": "IMAGE,SAM3DBODY_SHAPE_IMAGES",
           "link": 11
         }
       ],

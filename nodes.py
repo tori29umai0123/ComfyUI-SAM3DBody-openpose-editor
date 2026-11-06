@@ -26,6 +26,7 @@ BODY_COCO18_FROM_MHR70 = [0, 69, 6, 8, 41, 5, 7, 62, 10, 12, 14, 9, 11, 13, 2, 1
 RIGHT_HAND_OPENPOSE_FROM_MHR70 = [41, 24, 23, 22, 21, 28, 27, 26, 25, 32, 31, 30, 29, 36, 35, 34, 33, 40, 39, 38, 37]
 LEFT_HAND_OPENPOSE_FROM_MHR70 = [62, 45, 44, 43, 42, 49, 48, 47, 46, 53, 52, 51, 50, 57, 56, 55, 54, 61, 60, 59, 58]
 BODY_SHAPE_IMAGES_TYPE = "SAM3DBODY_SHAPE_IMAGES"
+BODY_SHAPE_INPUT_TYPE = f"IMAGE,{BODY_SHAPE_IMAGES_TYPE}"
 
 
 def _to_numpy(value):
@@ -59,9 +60,14 @@ def _image_batch_size(image):
     return int(arr.shape[0]) if arr.ndim >= 4 else 1
 
 
-def _body_shape_frames(body_shape_image=None, body_shape_images=None):
-    """Yield reference frames in the order they were connected, then batch order."""
-    sources = (() if body_shape_image is None else (body_shape_image,)) + tuple(body_shape_images or ())
+def _body_shape_frames(body_shape_images=None):
+    """Accept one IMAGE, an IMAGE batch, or an appended collection."""
+    if body_shape_images is None:
+        sources = ()
+    elif isinstance(body_shape_images, (list, tuple)):
+        sources = body_shape_images
+    else:
+        sources = (body_shape_images,)
     for source in sources:
         for batch_index in range(_image_batch_size(source)):
             yield source, batch_index
@@ -305,15 +311,14 @@ class SAM3DBodyOpenPoseAnalyze:
                 "auto_head_proportion": ("BOOLEAN", {"default": True}),
                 "person_threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
             },
-            "optional": {"body_shape_image": ("IMAGE",),
-                         "body_shape_images": (BODY_SHAPE_IMAGES_TYPE,)},
+            "optional": {"body_shape_images": (BODY_SHAPE_INPUT_TYPE,)},
         }
     RETURN_TYPES = ("POSE_KEYPOINT", "POSE_KEYPOINT", "IMAGE")
     RETURN_NAMES = ("pose_keypoint", "body_shape_keypoint", "debug_person_crops")
     FUNCTION = "analyze"
     CATEGORY = "SAM3DBody/openpose"
 
-    def analyze(self, pose_image, device="cuda", bbox_threshold=0.8, inference_type="full", confidence=1.0, auto_head_proportion=True, person_threshold=0.5, body_shape_image=None, body_shape_images=None):
+    def analyze(self, pose_image, device="cuda", bbox_threshold=0.8, inference_type="full", confidence=1.0, auto_head_proportion=True, person_threshold=0.5, body_shape_images=None):
         model_config = _make_model_config(DEFAULT_MODEL_PATH, device)
         loaded = _load_sam3d_model(model_config)
         from sam_3d_body import SAM3DBodyEstimator
@@ -333,9 +338,9 @@ class SAM3DBodyOpenPoseAnalyze:
             print(f"[SAM3DBodyOpenPose] SAM3.1 face-part detection skipped. Error: {e}")
         body_shape_outputs = pose_outputs
         body_shape_face_people = []
-        if body_shape_image is not None or body_shape_images:
+        if body_shape_images is not None:
             slots = []
-            for source, batch_index in _body_shape_frames(body_shape_image, body_shape_images):
+            for source, batch_index in _body_shape_frames(body_shape_images):
                 if len(slots) >= len(pose_outputs):
                     break
                 try:
@@ -361,7 +366,7 @@ class SAM3DBodyOpenPoseAnalyze:
             body_shape_outputs, body_shape_face_people = _body_shape_slots_for_pose(
                 pose_outputs, pose_pose["people"], slots)
         body_shape_pose = _make_body_shape_keypoint_from_outputs(body_shape_outputs, pose_width, pose_height, confidence)
-        if body_shape_image is not None or body_shape_images:
+        if body_shape_images is not None and slots:
             if __package__:
                 from .sam31_face import normalize_body_shape_to_pose
             else:
@@ -393,7 +398,7 @@ class SAM3DBodyOpenPoseVideoAnalyze:
     def analyze_video(self, pose_image, device="cuda", bbox_threshold=0.8, inference_type="full",
                       confidence=1.0, auto_head_proportion=True, person_threshold=0.5,
                       max_missing_frames=12, tracking_mode="sam31_video", max_tracked_people=16,
-                      detect_interval=1, body_shape_image=None, body_shape_images=None, track_data=None):
+                      detect_interval=1, body_shape_images=None, track_data=None):
         if __package__:
             from .sam31_face import detect_parts, update_pose, normalize_body_shape_to_pose
             from .sam31_video import track_people_video
@@ -413,7 +418,7 @@ class SAM3DBodyOpenPoseVideoAnalyze:
         estimator = SAM3DBodyEstimator(loaded["model"], loaded["model_cfg"],
                                       human_detector=None, human_segmentor=None, fov_estimator=None)
         slots = []
-        for source, batch_index in _body_shape_frames(body_shape_image, body_shape_images):
+        for source, batch_index in _body_shape_frames(body_shape_images):
             try:
                 outs, shape_width, shape_height, shape_people = _run_sam3d_estimator(
                     estimator, source, bbox_threshold, inference_type, batch_index, person_threshold)
