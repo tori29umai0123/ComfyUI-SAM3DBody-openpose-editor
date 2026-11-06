@@ -383,8 +383,6 @@ class SAM3DBodyOpenPoseVideoAnalyze:
     def INPUT_TYPES(cls):
         inputs = SAM3DBodyOpenPoseAnalyze.INPUT_TYPES()
         inputs["required"]["pose_image"] = ("IMAGE",)
-        inputs["required"]["max_missing_frames"] = ("INT", {"default": 12, "min": 0, "max": 300})
-        inputs["required"]["tracking_mode"] = (["sam31_video", "frame_matching"], {"default": "sam31_video"})
         inputs["required"]["max_tracked_people"] = ("INT", {"default": 16, "min": 1, "max": 64})
         inputs["required"]["detect_interval"] = ("INT", {"default": 1, "min": 1, "max": 60})
         inputs["optional"]["track_data"] = ("SAM3_TRACK_DATA",)
@@ -397,21 +395,16 @@ class SAM3DBodyOpenPoseVideoAnalyze:
 
     def analyze_video(self, pose_image, device="cuda", bbox_threshold=0.8, inference_type="full",
                       confidence=1.0, auto_head_proportion=True, person_threshold=0.5,
-                      max_missing_frames=12, tracking_mode="sam31_video", max_tracked_people=16,
+                      max_tracked_people=16,
                       detect_interval=1, body_shape_images=None, track_data=None):
         if __package__:
             from .sam31_face import detect_parts, update_pose, normalize_body_shape_to_pose
             from .sam31_video import track_people_video
-            from .video_tracking import PersonTracker
         else:
             from sam31_face import detect_parts, update_pose, normalize_body_shape_to_pose
             from sam31_video import track_people_video
-            from video_tracking import PersonTracker
-        if tracking_mode not in ("sam31_video", "frame_matching"):
-            raise ValueError(f"Unknown tracking_mode: {tracking_mode}")
-        use_native_tracking = track_data is not None or tracking_mode == "sam31_video"
-        tracked_frames = (track_people_video(pose_image, person_threshold, max_tracked_people,
-                                             detect_interval, track_data) if use_native_tracking else None)
+        tracked_frames = track_people_video(pose_image, person_threshold, max_tracked_people,
+                                            detect_interval, track_data)
         model_config = _make_model_config(DEFAULT_MODEL_PATH, device)
         loaded = _load_sam3d_model(model_config)
         from sam_3d_body import SAM3DBodyEstimator
@@ -438,30 +431,16 @@ class SAM3DBodyOpenPoseVideoAnalyze:
                 print(f"[SAM3DBodyOpenPose] video body-shape reference batch {batch_index} skipped. Error: {e}")
                 slots.append((None, None))
 
-        tracker = PersonTracker(max_missing_frames)
         pose_frames, shape_frames = [], []
         for frame_index in range(_image_batch_size(pose_image)):
             rgb = _comfy_image_to_rgb(pose_image, frame_index)
             height, width = rgb.shape[:2]
-            if use_native_tracking:
-                people = tracked_frames[frame_index]
-                ids = [person["track_id"] for person in people]
-                outputs, width, height = _run_sam3d_estimator_with_regions(
-                    estimator, pose_image, people, bbox_threshold, inference_type, frame_index)
-                if len(outputs) != len(ids):
-                    raise RuntimeError(f"SAM3DBody returned {len(outputs)} people for {len(ids)} SAM3.1 tracks in frame {frame_index}")
-            else:
-                try:
-                    outputs, width, height, people = _run_sam3d_estimator(
-                        estimator, pose_image, bbox_threshold, inference_type, frame_index, person_threshold)
-                except RuntimeError as e:
-                    if "did not detect any people" not in str(e) and "could not estimate any SAM3.1 person regions" not in str(e):
-                        raise
-                    outputs, people = [], []
-                ids = tracker.update(rgb, outputs, people, frame_index)
-                order = sorted(range(len(ids)), key=lambda i: ids[i])
-                outputs = [outputs[i] for i in order]
-                ids = [ids[i] for i in order]
+            people = tracked_frames[frame_index]
+            ids = [person["track_id"] for person in people]
+            outputs, width, height = _run_sam3d_estimator_with_regions(
+                estimator, pose_image, people, bbox_threshold, inference_type, frame_index)
+            if len(outputs) != len(ids):
+                raise RuntimeError(f"SAM3DBody returned {len(outputs)} people for {len(ids)} SAM3.1 tracks in frame {frame_index}")
             if not outputs:
                 print(f"[SAM3DBodyOpenPose] video frame {frame_index}: no people")
                 pose_frames.append({"people": [], "canvas_width": width, "canvas_height": height})
