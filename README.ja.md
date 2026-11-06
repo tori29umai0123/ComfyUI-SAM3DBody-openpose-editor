@@ -33,19 +33,19 @@ SAM3DBodyで画像内の人物の姿勢を推定し、OpenPose互換の `POSE_KE
 
 **上段が5人の入力画像、下段が推定したOpenPoseの骨格画像**です。入力画像から複数人の姿勢を抽出できることを示しています。
 
-![上段: 5人の入力画像。下段: 推定したOpenPoseの骨格画像。](sam3d_body_openpose_example.png)
+![上段: 5人の入力画像。下段: 推定したOpenPoseの骨格画像。](docs/images/sam3d_body_openpose_example.png)
 
 ### 体形リファレンスの例
 
 **上段がポーズ入力、中段が5人分のミニキャラ体形リファレンス、下段が体形を反映したOpenPose出力**です。各人物のポーズを保ちながら、対応するリファレンスの頭身に近づけられます。リファレンスは検出bboxの左上順で割り当てられるため、ポーズ画像で人物の並びが変わる場合は接続順も確認してください。この例のワークフローは [`workflows/sam3d_body_pose01_chibi01-05.json`](workflows/sam3d_body_pose01_chibi01-05.json) です。
 
-![上段: ポーズ入力。中段: 5人分のミニキャラ体形リファレンス。下段: リファレンスの頭身を反映したOpenPose出力。](sam3d_body_pose01_chibi01-05.png)
+![上段: ポーズ入力。中段: 5人分のミニキャラ体形リファレンス。下段: リファレンスの頭身を反映したOpenPose出力。](docs/images/sam3d_body_pose01_chibi01-05.png)
 
 ### 動画と体形変更の例
 
 **上段が動画のポーズ入力、中段が体形リファレンス、下段が人物を追跡して生成したOpenPose出力**です。GIFは5fpsで再生します。左端の人物にはミニキャラの体形リファレンスを適用しています。フレームが進んで立ち位置が変わっても、追跡IDにより同じ人物へ同じ体形を割り当てます。[動画サンプルのワークフロー](workflows/sam3d_body_pose01_chibi01_Video.json)を開き、動画と体形リファレンスを読み込みノードで指定してください。
 
-![動画サンプル。上段がポーズ入力、中段が体形リファレンス、下段が左端の人物をミニキャラ体形に変更したOpenPose出力。](sam3d_body_pose01_chibi01_Video.gif)
+![動画サンプル。上段がポーズ入力、中段が体形リファレンス、下段が左端の人物をミニキャラ体形に変更したOpenPose出力。](docs/images/sam3d_body_pose01_chibi01_Video.gif)
 
 ## モデル
 

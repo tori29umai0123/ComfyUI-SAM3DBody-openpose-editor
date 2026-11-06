@@ -35,19 +35,19 @@ Load [`workflows/sam3d_body_openpose_example.json`](workflows/sam3d_body_openpos
 
 The **top** of the image is the input with five people. The **bottom** is the OpenPose skeleton output estimated from that input.
 
-![Top: five-person input image. Bottom: estimated OpenPose skeletons.](sam3d_body_openpose_example.png)
+![Top: five-person input image. Bottom: estimated OpenPose skeletons.](docs/images/sam3d_body_openpose_example.png)
 
 ### Body-shape reference example
 
 The **top row** is the pose input. The **middle row** shows five chibi body-shape references. The **bottom row** is the output: it keeps the input poses while changing each person's body proportions toward the corresponding reference. References are assigned in detected bbox order, from the top-left person onward. The workflow is [`workflows/sam3d_body_pose01_chibi01-05.json`](workflows/sam3d_body_pose01_chibi01-05.json).
 
-![Top: pose input. Middle: five chibi body-shape references. Bottom: OpenPose output with the reference proportions.](sam3d_body_pose01_chibi01-05.png)
+![Top: pose input. Middle: five chibi body-shape references. Bottom: OpenPose output with the reference proportions.](docs/images/sam3d_body_pose01_chibi01-05.png)
 
 ### Video and body-shape reference example
 
 This animated example shows the video pose input in the top row, body-shape references in the middle row, and the tracked OpenPose output in the bottom row. The GIF plays at 5 fps. The leftmost person's body proportions are changed using the chibi reference. The same reference remains assigned to that person across frames as positions change. Load [`workflows/sam3d_body_pose01_chibi01_Video.json`](workflows/sam3d_body_pose01_chibi01_Video.json) and select your own video and reference images in its loader nodes.
 
-![Video example: pose frames above, body-shape references in the middle, and tracked OpenPose output below with the leftmost person changed to chibi proportions.](sam3d_body_pose01_chibi01_Video.gif)
+![Video example: pose frames above, body-shape references in the middle, and tracked OpenPose output below with the leftmost person changed to chibi proportions.](docs/images/sam3d_body_pose01_chibi01_Video.gif)
 
 ## Models
 
