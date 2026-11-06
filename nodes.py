@@ -120,11 +120,11 @@ def _make_model_config(model_path, device):
 
 
 def _load_sam3d_model(model_config):
+    if LOCAL_SAM3D_DIR not in sys.path:
+        sys.path.insert(0, LOCAL_SAM3D_DIR)
     key = (model_config["ckpt_path"], model_config.get("device", "cuda"))
     if key in _SAM3D_MODEL_CACHE:
         return _SAM3D_MODEL_CACHE[key]
-    if LOCAL_SAM3D_DIR not in sys.path:
-        sys.path.insert(0, LOCAL_SAM3D_DIR)
     from sam_3d_body.build_models import load_sam_3d_body
     model, model_cfg, mhr_path = load_sam_3d_body(model_config["ckpt_path"], device=model_config.get("device", "cuda"), mhr_path=model_config.get("mhr_path", ""))
     loaded = {"model": model, "model_cfg": model_cfg, "mhr_path": mhr_path, "device": model_config.get("device", "cuda")}
@@ -385,10 +385,9 @@ class SAM3DBodyOpenPoseVideoAnalyze:
         else:
             from sam31_face import detect_parts, update_pose, normalize_body_shape_to_pose
             from video_tracking import PersonTracker
-        from sam_3d_body import SAM3DBodyEstimator
-
         model_config = _make_model_config(DEFAULT_MODEL_PATH, device)
         loaded = _load_sam3d_model(model_config)
+        from sam_3d_body import SAM3DBodyEstimator
         estimator = SAM3DBodyEstimator(loaded["model"], loaded["model_cfg"],
                                       human_detector=None, human_segmentor=None, fov_estimator=None)
         slots = []
