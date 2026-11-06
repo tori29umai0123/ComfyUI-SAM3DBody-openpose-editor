@@ -1,5 +1,7 @@
 # ComfyUI-SAM3DBody-openpose-editor
 
+[English](README.md) | [日本語](README.ja.md)
+
 SAM 3D Body inference to OpenPose-compatible `POSE_KEYPOINT` data.
 
 ## Nodes
@@ -24,13 +26,17 @@ SAM 3D Body inference to OpenPose-compatible `POSE_KEYPOINT` data.
 
 Load [`workflows/sam3d_body_openpose_example.json`](workflows/sam3d_body_openpose_example.json) in ComfyUI, select an image in `Load Image`, then queue the workflow. It runs Analyze → Render → Save Image. For one body-shape reference, connect another `Load Image` node to Analyze's `body_shape_image` input. For multiple references, chain `SAM3D Body Shape Images (Append)` nodes in person order and connect the last output to Analyze's `body_shape_images` input. Connect Analyze's `body_shape_keypoint` output to Render's matching input. The node uses `models/sam3.1/sam3.1_multiplex_fp16.safetensors` if present and downloads it automatically on first use.
 
-Example OpenPose output:
+### Pose estimation example
 
-![OpenPose example](sam3d_body_openpose_example.png)
+The **top** of the image is the input with five people. The **bottom** is the OpenPose skeleton output estimated from that input.
 
-The five-person workflow in [`workflows/sam3d_body_pose01_chibi01-05.json`](workflows/sam3d_body_pose01_chibi01-05.json) accepts one pose image and five body-shape images, assigned in detected bbox order.
+![Top: five-person input image. Bottom: estimated OpenPose skeletons.](sam3d_body_openpose_example.png)
 
-![Five-person body-shape example](sam3d_body_pose01_chibi01-05.png)
+### Body-shape reference example
+
+The **top row** is the pose input. The **middle row** shows five chibi body-shape references. The **bottom row** is the output: it keeps the input poses while changing each person's body proportions toward the corresponding reference. References are assigned in detected bbox order, from the top-left person onward. The workflow is [`workflows/sam3d_body_pose01_chibi01-05.json`](workflows/sam3d_body_pose01_chibi01-05.json).
+
+![Top: pose input. Middle: five chibi body-shape references. Bottom: OpenPose output with the reference proportions.](sam3d_body_pose01_chibi01-05.png)
 
 ## Models
 
