@@ -361,6 +361,106 @@ class SAM3DBodyOpenPoseAnalyze:
         return ([pose_pose], [body_shape_pose], _debug_crops_to_image_tensor([]))
 
 
+class SAM3DBodyOpenPoseVideoAnalyze:
+    """Analyze an IMAGE batch as ordered video frames with stable person slots."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        inputs = SAM3DBodyOpenPoseAnalyze.INPUT_TYPES()
+        inputs["required"]["pose_image"] = ("IMAGE",)
+        inputs["required"]["max_missing_frames"] = ("INT", {"default": 12, "min": 0, "max": 300})
+        return inputs
+
+    RETURN_TYPES = ("POSE_KEYPOINT", "POSE_KEYPOINT")
+    RETURN_NAMES = ("pose_keypoint", "body_shape_keypoint")
+    FUNCTION = "analyze_video"
+    CATEGORY = "SAM3DBody/openpose"
+
+    def analyze_video(self, pose_image, device="cuda", bbox_threshold=0.8, inference_type="full",
+                      confidence=1.0, auto_head_proportion=True, person_threshold=0.5,
+                      max_missing_frames=12, body_shape_image=None, body_shape_images=None):
+        if __package__:
+            from .sam31_face import detect_parts, update_pose, normalize_body_shape_to_pose
+            from .video_tracking import PersonTracker
+        else:
+            from sam31_face import detect_parts, update_pose, normalize_body_shape_to_pose
+            from video_tracking import PersonTracker
+        from sam_3d_body import SAM3DBodyEstimator
+
+        model_config = _make_model_config(DEFAULT_MODEL_PATH, device)
+        loaded = _load_sam3d_model(model_config)
+        estimator = SAM3DBodyEstimator(loaded["model"], loaded["model_cfg"],
+                                      human_detector=None, human_segmentor=None, fov_estimator=None)
+        slots = []
+        for source, batch_index in _body_shape_frames(body_shape_image, body_shape_images):
+            try:
+                outs, shape_width, shape_height, shape_people = _run_sam3d_estimator(
+                    estimator, source, bbox_threshold, inference_type, batch_index, person_threshold)
+                face_people = [None] * len(outs)
+                if auto_head_proportion:
+                    shape_pose = _make_openpose_keypoint_from_outputs(outs, shape_width, shape_height, confidence)
+                    try:
+                        anchors = [_pose_person_head_anchor(p) for p in shape_pose["people"]]
+                        parts = detect_parts(_comfy_image_to_rgb(source, batch_index), anchors,
+                                             person_boxes=_person_boxes_from_outputs(outs),
+                                             person_candidates=shape_people)
+                        face_people = update_pose(shape_pose, parts)["people"]
+                    except Exception as e:
+                        print(f"[SAM3DBodyOpenPose] video body-shape face detection skipped for batch {batch_index}. Error: {e}")
+                slots.extend(zip(outs, face_people))
+            except Exception as e:
+                print(f"[SAM3DBodyOpenPose] video body-shape reference batch {batch_index} skipped. Error: {e}")
+                slots.append((None, None))
+
+        tracker = PersonTracker(max_missing_frames)
+        pose_frames, shape_frames = [], []
+        for frame_index in range(_image_batch_size(pose_image)):
+            rgb = _comfy_image_to_rgb(pose_image, frame_index)
+            height, width = rgb.shape[:2]
+            try:
+                outputs, width, height, people = _run_sam3d_estimator(
+                    estimator, pose_image, bbox_threshold, inference_type, frame_index, person_threshold)
+            except RuntimeError as e:
+                if "did not detect any people" not in str(e) and "could not estimate any SAM3.1 person regions" not in str(e):
+                    raise
+                print(f"[SAM3DBodyOpenPose] video frame {frame_index}: no people")
+                tracker.update(rgb, [], [], frame_index)
+                pose_frames.append({"people": [], "canvas_width": width, "canvas_height": height})
+                shape_frames.append({"people": [], "canvas_width": width, "canvas_height": height})
+                continue
+
+            ids = tracker.update(rgb, outputs, people, frame_index)
+            order = sorted(range(len(ids)), key=lambda i: ids[i])
+            outputs = [outputs[i] for i in order]
+            ids = [ids[i] for i in order]
+            pose_pose = _make_openpose_keypoint_from_outputs(outputs, width, height, confidence)
+            try:
+                anchors = [_pose_person_head_anchor(p) for p in pose_pose["people"]]
+                if anchors:
+                    parts = detect_parts(rgb, anchors, person_boxes=_person_boxes_from_outputs(outputs),
+                                         person_candidates=people)
+                    pose_pose = update_pose(pose_pose, parts)
+            except Exception as e:
+                print(f"[SAM3DBodyOpenPose] video frame {frame_index}: face-part detection skipped. Error: {e}")
+
+            shape_outputs, shape_face_people = [], []
+            for index, id_ in enumerate(ids):
+                shape_output, shape_face = slots[id_] if id_ < len(slots) else (None, None)
+                shape_outputs.append(shape_output if shape_output is not None else outputs[index])
+                shape_face_people.append(shape_face if shape_face is not None else pose_pose["people"][index])
+            shape_pose = _make_body_shape_keypoint_from_outputs(shape_outputs, width, height, confidence)
+            if slots:
+                shape_pose = normalize_body_shape_to_pose(
+                    shape_pose, pose_pose, shape_face_people if auto_head_proportion else None)
+            for person, id_ in zip(pose_pose["people"], ids):
+                person["track_id"] = id_
+            for person, id_ in zip(shape_pose["people"], ids):
+                person["track_id"] = id_
+            pose_frames.append(pose_pose)
+            shape_frames.append(shape_pose)
+        return (pose_frames, shape_frames)
+
+
 class SAM3DBodyOpenPoseRender:
     @classmethod
     def INPUT_TYPES(cls):
@@ -425,8 +525,10 @@ class SAM3DBodyOpenPoseRender:
 
 
 NODE_CLASS_MAPPINGS = {"SAM3DBodyOpenPoseAnalyze": SAM3DBodyOpenPoseAnalyze,
+                       "SAM3DBodyOpenPoseVideoAnalyze": SAM3DBodyOpenPoseVideoAnalyze,
                        "SAM3DBodyOpenPoseBodyShapeAppend": SAM3DBodyOpenPoseBodyShapeAppend,
                        "SAM3DBodyOpenPoseRender": SAM3DBodyOpenPoseRender}
 NODE_DISPLAY_NAME_MAPPINGS = {"SAM3DBodyOpenPoseAnalyze": "SAM3D Body OpenPose Analyze",
+                              "SAM3DBodyOpenPoseVideoAnalyze": "SAM3D Body OpenPose Video Analyze",
                               "SAM3DBodyOpenPoseBodyShapeAppend": "SAM3D Body Shape Images (Append)",
                               "SAM3DBodyOpenPoseRender": "SAM3D Body OpenPose Render"}
