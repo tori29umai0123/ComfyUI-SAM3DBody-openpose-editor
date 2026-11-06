@@ -1,7 +1,6 @@
-﻿import importlib.util
+import importlib.util
 import json
 import os
-import shutil
 import sys
 
 import numpy as np
@@ -19,22 +18,14 @@ except Exception:
     DEFAULT_MODELS_DIR = os.path.abspath(os.path.join(ROOT_DIR, "..", "..", "models"))
 
 DEFAULT_MODEL_PATH = os.path.join(DEFAULT_MODELS_DIR, "sam3dbody")
-ANIMEHEADS_MODEL_RELATIVE_PATH = os.path.join("animeheads", "animeheadsv3.onnx")
-RTDETRV4_BODY_MODEL_RELATIVE_PATH = os.path.join("rtdetrv4", "rtdetrv4-x-manga109s_v2.onnx")
-RTDETRV4_BODY_REPO_ID = "tori29umai/rtdetrv4-x-manga109s_v2"
-RTDETRV4_BODY_REPO_FILENAME = "model.onnx"
-RTDETRV4_BODY_SCORE_THRESHOLD = 0.10
 
 _SAM3D_MODEL_CACHE = {}
-_ANIMEHEADS_NET_CACHE = {}
-_RTDETRV4_BODY_SESSION_CACHE = {}
-_ANIME_FACE_DETECTOR_CACHE = {}
-_ANIME_FACE_DETECTOR_WARNED = False
 _OPENPOSE_UTIL = None
 
 BODY_COCO18_FROM_MHR70 = [0, 69, 6, 8, 41, 5, 7, 62, 10, 12, 14, 9, 11, 13, 2, 1, 4, 3]
 RIGHT_HAND_OPENPOSE_FROM_MHR70 = [41, 24, 23, 22, 21, 28, 27, 26, 25, 32, 31, 30, 29, 36, 35, 34, 33, 40, 39, 38, 37]
 LEFT_HAND_OPENPOSE_FROM_MHR70 = [62, 45, 44, 43, 42, 49, 48, 47, 46, 53, 52, 51, 50, 57, 56, 55, 54, 61, 60, 59, 58]
+BODY_SHAPE_IMAGES_TYPE = "SAM3DBODY_SHAPE_IMAGES"
 
 
 def _to_numpy(value):
@@ -68,6 +59,24 @@ def _image_batch_size(image):
     return int(arr.shape[0]) if arr.ndim >= 4 else 1
 
 
+def _body_shape_frames(body_shape_image=None, body_shape_images=None):
+    """Yield reference frames in the order they were connected, then batch order."""
+    sources = (() if body_shape_image is None else (body_shape_image,)) + tuple(body_shape_images or ())
+    for source in sources:
+        for batch_index in range(_image_batch_size(source)):
+            yield source, batch_index
+
+
+def _body_shape_slots_for_pose(pose_outputs, pose_people, slots):
+    """Keep reference positions fixed when one frame failed or fewer were supplied."""
+    outputs, faces = [], []
+    for index, pose_output in enumerate(pose_outputs):
+        shape_output, shape_face = slots[index] if index < len(slots) else (None, None)
+        outputs.append(shape_output if shape_output is not None else pose_output)
+        faces.append(shape_face if shape_face is not None else pose_people[index])
+    return outputs, faces
+
+
 def _comfy_image_to_rgb(image, batch_index=0):
     if isinstance(image, torch.Tensor):
         arr = image[int(batch_index)].detach().cpu().numpy()
@@ -77,624 +86,19 @@ def _comfy_image_to_rgb(image, batch_index=0):
     return np.clip(arr * 255.0, 0, 255).astype(np.uint8)
 
 
-def _comfy_image_to_bgr(image, batch_index=0):
-    return _comfy_image_to_rgb(image, batch_index)[..., ::-1].copy()
-
-
-def _resolve_model_path_under_models(model_path, default_relative_path):
-    if not model_path:
-        model_path = default_relative_path
-    model_path = os.path.expanduser(str(model_path))
-    if not os.path.isabs(model_path):
-        model_path = os.path.join(DEFAULT_MODELS_DIR, model_path)
-    return os.path.abspath(model_path)
-
-
-def _ensure_animeheads_model(model_path=None):
-    model_path = _resolve_model_path_under_models(model_path, ANIMEHEADS_MODEL_RELATIVE_PATH)
-    if os.path.exists(model_path):
-        return model_path
-    try:
-        from .model_download import download
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        print("[SAM3DBodyOpenPose] AnimeHeads model not found locally. Downloading from HuggingFace...")
-        downloaded = download("file", repo_id="tori29umai/AnimeHeads-ONNX", filename="weights/animeheadsv3.onnx", repo_type="model")
-        shutil.copyfile(downloaded, model_path)
-        return model_path
-    except Exception as e:
-        raise RuntimeError(f"AnimeHeads ONNX download failed. Place it at {model_path}. Error: {e}") from e
-
-
-def _ensure_rtdetrv4_body_model(model_path=None):
-    model_path = _resolve_model_path_under_models(model_path, RTDETRV4_BODY_MODEL_RELATIVE_PATH)
-    if os.path.exists(model_path):
-        return model_path
-    try:
-        from .model_download import download
-        os.makedirs(os.path.dirname(model_path), exist_ok=True)
-        print("[SAM3DBodyOpenPose] RT-DETRv4 body model not found locally. Downloading from HuggingFace...")
-        downloaded = download("file", repo_id=RTDETRV4_BODY_REPO_ID, filename=RTDETRV4_BODY_REPO_FILENAME, repo_type="model")
-        shutil.copyfile(downloaded, model_path)
-        return model_path
-    except Exception as e:
-        raise RuntimeError(f"RT-DETRv4 body ONNX download failed. Place it at {model_path}. Error: {e}") from e
-
-
-def _load_animeheads_net(model_path=None):
-    import cv2
-    model_path = _ensure_animeheads_model(model_path)
-    key = os.path.abspath(model_path)
-    if key not in _ANIMEHEADS_NET_CACHE:
-        _ANIMEHEADS_NET_CACHE[key] = cv2.dnn.readNetFromONNX(key)
-    return _ANIMEHEADS_NET_CACHE[key]
-
-
-def _load_rtdetrv4_body_session(model_path=None):
-    model_path = _ensure_rtdetrv4_body_model(model_path)
-    key = os.path.abspath(model_path)
-    if key not in _RTDETRV4_BODY_SESSION_CACHE:
-        import onnxruntime as ort
-        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if torch.cuda.is_available() else ["CPUExecutionProvider"]
-        _RTDETRV4_BODY_SESSION_CACHE[key] = ort.InferenceSession(key, providers=providers)
-    return _RTDETRV4_BODY_SESSION_CACHE[key]
-
-
-def _letterbox_bgr(image, size=640):
-    import cv2
-    h, w = image.shape[:2]
-    scale = min(size / max(h, 1), size / max(w, 1))
-    nw, nh = int(round(w * scale)), int(round(h * scale))
-    resized = cv2.resize(image, (nw, nh), interpolation=cv2.INTER_LINEAR)
-    canvas = np.full((size, size, 3), 114, dtype=np.uint8)
-    px, py = (size - nw) // 2, (size - nh) // 2
-    canvas[py:py + nh, px:px + nw] = resized
-    return canvas, scale, px, py
-
-
-def _detect_anime_heads(image_bgr, model_path=None, confidence=0.25):
-    import cv2
-    if image_bgr is None:
-        return []
-    net = _load_animeheads_net(model_path)
-    inp, scale, px, py = _letterbox_bgr(image_bgr, 640)
-    blob = cv2.dnn.blobFromImage(inp, 1.0 / 255.0, (640, 640), swapRB=True, crop=False)
-    net.setInput(blob)
-    out = net.forward()
-    if out.ndim == 3:
-        out = out[0]
-    if out.shape[0] == 5:
-        out = out.T
-    ih, iw = image_bgr.shape[:2]
-    boxes, scores = [], []
-    for row in out:
-        if len(row) < 5:
-            continue
-        cx, cy, w, h, score = [float(v) for v in row[:5]]
-        if score < float(confidence):
-            continue
-        x1 = max(0.0, min(float(iw), (cx - w * 0.5 - px) / scale))
-        y1 = max(0.0, min(float(ih), (cy - h * 0.5 - py) / scale))
-        x2 = max(0.0, min(float(iw), (cx + w * 0.5 - px) / scale))
-        y2 = max(0.0, min(float(ih), (cy + h * 0.5 - py) / scale))
-        if x2 <= x1 or y2 <= y1:
-            continue
-        boxes.append([int(round(x1)), int(round(y1)), int(round(x2 - x1)), int(round(y2 - y1))])
-        scores.append(score)
-    if not boxes:
-        return []
-    keep = cv2.dnn.NMSBoxes(boxes, scores, score_threshold=float(confidence), nms_threshold=0.45)
-    if len(keep) == 0:
-        return []
-    detections = []
-    for i in np.array(keep).reshape(-1).tolist():
-        x, y, w, h = boxes[i]
-        detections.append({"bbox": [float(x), float(y), float(x + w), float(y + h)], "confidence": float(scores[i])})
-    detections.sort(key=lambda d: (d["bbox"][1], d["bbox"][0]))
-    return detections
-
-
-def _bbox_iou(a, b):
-    ax1, ay1, ax2, ay2 = a[:4]
-    bx1, by1, bx2, by2 = b[:4]
-    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
-    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
-    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
-    aa = max(1.0, (ax2 - ax1) * (ay2 - ay1))
-    ba = max(1.0, (bx2 - bx1) * (by2 - by1))
-    return inter / max(1.0, aa + ba - inter)
-
-
-def _nms_dict_boxes(items, iou_thr):
-    items = sorted(items or [], key=lambda x: float(x.get("score", x.get("confidence", 0.0))), reverse=True)
-    kept = []
-    for item in items:
-        if all(_bbox_iou(item["bbox"], k["bbox"]) <= iou_thr for k in kept):
-            kept.append(item)
-    return kept
-
-
-def _detect_rtdetrv4_body_persons(image_bgr, score_thr=RTDETRV4_BODY_SCORE_THRESHOLD):
-    import cv2
-
-    session = _load_rtdetrv4_body_session()
-    image_rgb = image_bgr[..., ::-1].copy()
-    height, width = image_rgb.shape[:2]
-    resized = cv2.resize(image_rgb, (1280, 1280), interpolation=cv2.INTER_LINEAR)
-    images = np.transpose(resized.astype(np.float32) / 255.0, (2, 0, 1))[None, ...]
-    target_sizes = np.asarray([[width, height]], dtype=np.int64)
-    labels, boxes, scores = session.run(None, {"images": images, "orig_target_sizes": target_sizes})
-    labels = np.asarray(labels[0])
-    boxes = np.asarray(boxes[0], dtype=np.float32)
-    scores = np.asarray(scores[0], dtype=np.float32)
-    keep = (labels == 0) & (scores >= float(score_thr))
-    out = []
-    for box, score in zip(boxes[keep], scores[keep]):
-        x1, y1, x2, y2 = [float(v) for v in box[:4]]
-        if x2 > x1 and y2 > y1:
-            out.append({"bbox": [x1, y1, x2, y2], "score": float(score)})
-    return _nms_dict_boxes(out, 0.55)
-
-
-def _face_bbox_center(face):
-    bbox = face.get("bbox", []) if isinstance(face, dict) else []
-    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-        return None
-    try:
-        x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
-    except Exception:
-        return None
-    if not np.isfinite([x1, y1, x2, y2]).all():
-        return None
-    return (x1 + x2) * 0.5, (y1 + y2) * 0.5, max(abs(x2 - x1), abs(y2 - y1))
-
-
-def _target_box_assignment_score(head, person_box):
-    center = _face_bbox_center(head)
-    if center is None or person_box is None:
-        return -999.0
-    fx, fy, fsize = center
-    x1, y1, x2, y2 = [float(v) for v in person_box[:4]]
-    bw, bh = max(1.0, x2 - x1), max(1.0, y2 - y1)
-    inside = 1.0 if x1 <= fx <= x2 and y1 <= fy <= y2 else 0.0
-    dist = np.hypot((fx - (x1 + x2) * 0.5) / bw, (fy - (y1 + y2) * 0.5) / bh)
-    return float(inside * 4.0 + min(1.0, fsize / max(1.0, min(bw, bh))) - dist)
-
-
-def _body_boxes_from_heads_and_rtdetr(image_bgr, head_confidence, device):
-    heads = _detect_anime_heads(image_bgr, ANIMEHEADS_MODEL_RELATIVE_PATH, head_confidence) or []
-    if not heads:
-        return None, []
-    for i, h in enumerate(heads):
-        h["face_id"] = i
-    try:
-        persons = _detect_rtdetrv4_body_persons(image_bgr)
-    except Exception as e:
-        print(f"[SAM3DBodyOpenPose] RT-DETRv4 body boxes skipped. Error: {e}")
-        persons = []
-    used, boxes = set(), []
-    ih, iw = image_bgr.shape[:2]
-    for head in heads:
-        best_i, best_s = None, -999.0
-        for idx, person in enumerate(persons):
-            if idx in used:
-                continue
-            score = _target_box_assignment_score(head, person.get("bbox"))
-            if score > best_s:
-                best_i, best_s = idx, score
-        if best_i is not None and best_s >= -0.15:
-            used.add(best_i)
-            box = persons[best_i]["bbox"]
-        else:
-            x1, y1, x2, y2 = head["bbox"]
-            hw, hh = x2 - x1, y2 - y1
-            cx = (x1 + x2) * 0.5
-            box = [cx - hw * 2.4, y1 - hh * 0.9, cx + hw * 2.4, y2 + hh * 6.0]
-            box = [max(0.0, box[0]), max(0.0, box[1]), min(float(iw), box[2]), min(float(ih), box[3])]
-        boxes.append(box)
-    return np.asarray(boxes, dtype=np.float32), heads
-
-
-def _anime_face_device(device):
-    return "cuda:0" if str(device).startswith("cuda") and torch.cuda.is_available() else "cpu"
-
-
-def _load_anime_face_detector(device="cuda"):
-    global _ANIME_FACE_DETECTOR_WARNED
-    key = ("yolov3", _anime_face_device(device))
-    if key in _ANIME_FACE_DETECTOR_CACHE:
-        return _ANIME_FACE_DETECTOR_CACHE[key]
-    try:
-        from anime_face_detector import create_detector
-        detector = create_detector("yolov3", device=key[1])
-        _ANIME_FACE_DETECTOR_CACHE[key] = detector
-        return detector
-    except Exception as e:
-        if not _ANIME_FACE_DETECTOR_WARNED:
-            print(f"[SAM3DBodyOpenPose] anime-face-detector unavailable; face keypoints skipped. Error: {e}")
-            _ANIME_FACE_DETECTOR_WARNED = True
-        _ANIME_FACE_DETECTOR_CACHE[key] = None
-        return None
-
-
-def _anime_face_from_prediction(pred, offset_x=0.0, offset_y=0.0):
-    bbox = _to_numpy(pred.get("bbox")) if isinstance(pred, dict) else None
-    keypoints = _to_numpy(pred.get("keypoints")) if isinstance(pred, dict) else None
-    if bbox is None or keypoints is None:
-        return None
-    bbox = np.asarray(bbox, dtype=np.float32).copy()
-    keypoints = np.asarray(keypoints, dtype=np.float32).copy()
-    if bbox.ndim != 1 or len(bbox) < 4 or keypoints.ndim != 2 or keypoints.shape[1] < 2:
-        return None
-    bbox[0] += float(offset_x); bbox[2] += float(offset_x)
-    bbox[1] += float(offset_y); bbox[3] += float(offset_y)
-    keypoints[:, 0] += float(offset_x); keypoints[:, 1] += float(offset_y)
-    return {"bbox": _to_jsonable(bbox), "keypoints": _to_jsonable(keypoints[:, :3] if keypoints.shape[1] >= 3 else keypoints[:, :2])}
-
-
-def _append_unique_face(faces, face):
-    center = _face_bbox_center(face)
-    if center is None:
-        return
-    cx, cy, size = center
-    for existing in faces:
-        other = _face_bbox_center(existing)
-        if other is None:
-            continue
-        ox, oy, osize = other
-        threshold = max(12.0, min(size, osize) * 0.55)
-        if abs(cx - ox) <= threshold and abs(cy - oy) <= threshold:
-            return
-    faces.append(face)
-
-
-def _expanded_face_crop_from_anime_head(head, image_width, image_height):
-    bbox = head.get("bbox", []) if isinstance(head, dict) else []
-    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-        return None
-    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
-    if not np.isfinite([x1, y1, x2, y2]).all():
-        return None
-    w, h = max(1.0, x2 - x1), max(1.0, y2 - y1)
-    px, py = w * 0.45, h * 0.45
-    cx1 = max(0, int(round(x1 - px)))
-    cy1 = max(0, int(round(y1 - py)))
-    cx2 = min(int(image_width), int(round(x2 + px)))
-    cy2 = min(int(image_height), int(round(y2 + py)))
-    if cx2 - cx1 < 20 or cy2 - cy1 < 20:
-        return None
-    return cx1, cy1, cx2, cy2
-
-
-def _face_detection_crop_scale(crop):
-    if crop is None or crop.size == 0:
-        return 1.0
-    short = max(1, min(int(crop.shape[0]), int(crop.shape[1])))
-    return 1.0 if short >= 256 else min(2.0, 256.0 / float(short))
-
-
-def _rescale_face_detection(face, scale, offset_x=0.0, offset_y=0.0):
-    if face is None:
-        return None
-    face = dict(face)
-    bbox = list(face.get("bbox", []))
-    if len(bbox) >= 4:
-        for idx in range(4):
-            bbox[idx] = float(bbox[idx]) / scale + (float(offset_x) if idx in (0, 2) else float(offset_y))
-        face["bbox"] = bbox
-    keypoints = []
-    for point in face.get("keypoints", []) or []:
-        if not isinstance(point, (list, tuple)) or len(point) < 2:
-            continue
-        new_point = list(point)
-        new_point[0] = float(new_point[0]) / scale + float(offset_x)
-        new_point[1] = float(new_point[1]) / scale + float(offset_y)
-        keypoints.append(new_point)
-    face["keypoints"] = keypoints
-    return face
-
-
-def _detect_faces_in_crop(detector, crop, offset_x=0.0, offset_y=0.0):
-    if crop is None or crop.size == 0:
-        return []
-    import cv2
-    scale = _face_detection_crop_scale(crop)
-    detector_input = crop
-    if scale > 1.01:
-        detector_input = cv2.resize(crop, (int(round(crop.shape[1] * scale)), int(round(crop.shape[0] * scale))), interpolation=cv2.INTER_CUBIC)
-    faces = []
-    for pred in detector(detector_input) or []:
-        face = _rescale_face_detection(_anime_face_from_prediction(pred), scale, offset_x, offset_y)
-        if face is not None:
-            face["source"] = "anime-face-detector"
-            faces.append(face)
-    return faces
-
-
-def _anime_head_box_in_crop(head, crop_box, scale=1.0):
-    bbox = head.get("bbox", []) if isinstance(head, dict) else []
-    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
-        return None
-    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
-    cx1, cy1, cx2, cy2 = [float(v) for v in crop_box]
-    x1 = max(cx1, min(cx2 - 1.0, x1)); y1 = max(cy1, min(cy2 - 1.0, y1))
-    x2 = max(cx1 + 1.0, min(cx2, x2)); y2 = max(cy1 + 1.0, min(cy2, y2))
-    if x2 <= x1 or y2 <= y1:
-        return None
-    score = float(head.get("confidence", 1.0))
-    return np.asarray([(x1 - cx1) * scale, (y1 - cy1) * scale, (x2 - cx1) * scale, (y2 - cy1) * scale, score], dtype=np.float32)
-
-
-def _detect_face_landmarks_for_anime_head(detector, crop, crop_box, head):
-    if crop is None or crop.size == 0:
-        return []
-    import cv2
-    scale = _face_detection_crop_scale(crop)
-    detector_input = crop
-    if scale > 1.01:
-        detector_input = cv2.resize(crop, (int(round(crop.shape[1] * scale)), int(round(crop.shape[0] * scale))), interpolation=cv2.INTER_CUBIC)
-    box = _anime_head_box_in_crop(head, crop_box, scale)
-    if box is None:
-        return []
-    faces = []
-    for pred in detector(detector_input, boxes=[box]) or []:
-        face = _rescale_face_detection(_anime_face_from_prediction(pred), scale, crop_box[0], crop_box[1])
-        if face is not None:
-            face["source"] = "animeheads-guided"
-            faces.append(face)
-    return faces
-
-
-def _filter_faces_by_heads(faces, heads):
-    if not faces or not heads:
-        return faces
-    matched = {}
-    for face in faces:
-        fc = _face_bbox_center(face)
-        if fc is None:
-            continue
-        fcx, fcy, fsize = fc
-        best_i, best_score = None, None
-        for i, head in enumerate(heads):
-            x1, y1, x2, y2 = [float(v) for v in head.get("bbox", [])[:4]]
-            hw, hh = max(1.0, x2 - x1), max(1.0, y2 - y1)
-            if fcx < x1 - hw * 0.35 or fcx > x2 + hw * 0.35 or fcy < y1 - hh * 0.35 or fcy > y2 + hh * 0.35:
-                continue
-            ratio = fsize / max(hw, hh)
-            if ratio < 0.10 or ratio > 1.60:
-                continue
-            score = ((fcx - (x1 + x2) * 0.5) / max(hw, hh)) ** 2 + ((fcy - (y1 + y2) * 0.5) / max(hw, hh)) ** 2
-            if best_score is None or score < best_score:
-                best_i, best_score = i, score
-        if best_i is not None:
-            current = matched.get(best_i)
-            if current is None or best_score < current[0]:
-                matched[best_i] = (best_score, face)
-    return [item[1] for _, item in sorted(matched.items(), key=lambda p: p[0])] or faces
-
-
-def _detect_anime_face_keypoints(image_bgr, device="cuda", pose_keypoint=None, head_confidence=0.25):
-    detector = _load_anime_face_detector(device)
-    if detector is None or image_bgr is None:
-        return []
-    detections = []
-    heads = []
-    with torch.no_grad():
-        for face in _detect_faces_in_crop(detector, image_bgr):
-            _append_unique_face(detections, face)
-        h, w = image_bgr.shape[:2]
-        try:
-            heads = _detect_anime_heads(image_bgr, ANIMEHEADS_MODEL_RELATIVE_PATH, max(0.20, float(head_confidence) * 0.8)) or []
-        except Exception as e:
-            print(f"[SAM3DBodyOpenPose] AnimeHeads-guided face landmark detection skipped. Error: {e}")
-        for head in heads:
-            crop_box = _expanded_face_crop_from_anime_head(head, w, h)
-            if crop_box is None:
-                continue
-            x1, y1, x2, y2 = crop_box
-            crop = image_bgr[y1:y2, x1:x2, :]
-            for face in _detect_face_landmarks_for_anime_head(detector, crop, crop_box, head):
-                _append_unique_face(detections, face)
-    detections = _filter_faces_by_heads(detections, heads)
-    detections.sort(key=lambda f: (float(f["bbox"][1]) if len(f.get("bbox", [])) >= 4 else 0.0, float(f["bbox"][0]) if len(f.get("bbox", [])) >= 4 else 0.0))
-    return detections
-
-
-def _point_from_body(person, index):
-    body = person.get("pose_keypoints_2d", []) if isinstance(person, dict) else []
-    off = index * 3
-    if off + 2 >= len(body):
-        return None
-    try:
-        x, y, c = float(body[off]), float(body[off + 1]), float(body[off + 2])
-    except Exception:
-        return None
-    if c <= 0.0 or not np.isfinite(x) or not np.isfinite(y):
-        return None
-    return np.asarray([x, y], dtype=np.float32)
-
-
 def _pose_person_head_anchor(person):
-    pts = [_point_from_body(person, idx) for idx in (0, 14, 15, 16, 17)]
-    pts = [p for p in pts if p is not None]
-    if not pts:
+    body = np.asarray(person.get("pose_keypoints_2d", []), dtype=np.float32).reshape(-1, 3)
+    if len(body) < 18:
         return None
-    arr = np.asarray(pts, dtype=np.float32)
-    anchor = arr.mean(axis=0)
-    head_size = 0.0
-    for i in range(len(arr)):
-        for j in range(i + 1, len(arr)):
-            head_size = max(head_size, float(np.linalg.norm(arr[i] - arr[j])))
-    neck = _point_from_body(person, 1)
-    neck_dist = float(np.linalg.norm(anchor - neck)) if neck is not None else 0.0
-    radius = max(36.0, head_size * 2.8, neck_dist * 1.35)
-    return float(anchor[0]), float(anchor[1]), radius
-
-
-def _face_landmark_center(face):
-    pts = []
-    for p in face.get("keypoints", []) if isinstance(face, dict) else []:
-        if len(p) < 2:
-            continue
-        score = float(p[2]) if len(p) > 2 else 1.0
-        if score <= 0:
-            continue
-        x, y = float(p[0]), float(p[1])
-        if np.isfinite(x) and np.isfinite(y):
-            pts.append((x, y))
-    if pts:
-        arr = np.asarray(pts, dtype=np.float32)
-        return float(arr[:, 0].mean()), float(arr[:, 1].mean())
-    center = _face_bbox_center(face)
-    return None if center is None else (center[0], center[1])
-
-
-def _face_detection_confidence(face):
-    bbox = face.get("bbox", []) if isinstance(face, dict) else []
-    if len(bbox) >= 5:
-        try:
-            return float(bbox[4])
-        except Exception:
-            pass
-    return 1.0
-
-
-def _face_matches_pose_head(face, anchor):
-    center = _face_landmark_center(face)
-    box = _face_bbox_center(face)
-    if center is None or box is None or anchor is None:
-        return False
-    if _face_detection_confidence(face) < 0.55:
-        return False
-    fcx, fcy = center
-    ax, ay, radius = anchor
-    fsize = float(box[2])
-    return float(np.hypot(fcx - ax, fcy - ay)) <= min(radius + fsize * 0.20, radius * 1.05)
-
-
-def _face_near_pose_head(face, anchor):
-    center = _face_landmark_center(face)
-    box = _face_bbox_center(face)
-    if center is None or box is None or anchor is None:
-        return False
-    return float(np.hypot(center[0] - anchor[0], center[1] - anchor[1])) <= anchor[2] + float(box[2]) * 0.65
-
-
-def _animehead_matches_pose_head(head, anchor):
-    box = head.get("bbox", []) if isinstance(head, dict) else []
-    if len(box) < 4 or anchor is None:
-        return False
-    x1, y1, x2, y2 = [float(v) for v in box[:4]]
-    cx, cy = (x1 + x2) * 0.5, (y1 + y2) * 0.5
-    size = max(1.0, x2 - x1, y2 - y1)
-    return float(np.hypot(cx - anchor[0], cy - anchor[1])) <= max(anchor[2], size * 0.85)
-
-
-def _face_visibility_box(face):
-    bbox = face.get("bbox", []) if isinstance(face, dict) else []
-    if len(bbox) < 4:
+    points = body[[0, 14, 15, 16, 17]]
+    points = points[(points[:, 2] > 0) & np.isfinite(points[:, :2]).all(axis=1), :2]
+    if len(points) == 0:
         return None
-    x1, y1, x2, y2 = [float(v) for v in bbox[:4]]
-    w, h = max(1.0, x2 - x1), max(1.0, y2 - y1)
-    return x1 - w * 0.18, y1 - h * 0.22, x2 + w * 0.18, y2 + h * 0.22
-
-
-def _visible_face_for_pose_head(faces, anchor):
-    best, best_d = None, None
-    for face in faces or []:
-        if isinstance(face, dict) and face.get("source") == "animeheads-guided":
-            continue
-        if not _face_matches_pose_head(face, anchor):
-            continue
-        center = _face_landmark_center(face)
-        if center is None:
-            continue
-        dist = float(np.hypot(center[0] - anchor[0], center[1] - anchor[1]))
-        if best_d is None or dist < best_d:
-            best, best_d = face, dist
-    return best
-
-
-def _hide_invisible_openpose_face_parts(person, visible_face=None):
-    body = list(person.get("pose_keypoints_2d", [])) if isinstance(person, dict) else []
-    if not body:
-        return person, False, 0
-    box = _face_visibility_box(visible_face) if visible_face is not None else None
-    changed, hidden = False, 0
-    for idx in (0, 14, 15, 16, 17):
-        off = idx * 3
-        if off + 2 >= len(body):
-            continue
-        try:
-            score = float(body[off + 2]); x = float(body[off]); y = float(body[off + 1])
-        except Exception:
-            continue
-        if score <= 0:
-            continue
-        visible = False
-        if box is not None:
-            x1, y1, x2, y2 = box
-            visible = x1 <= x <= x2 and y1 <= y <= y2
-        if visible:
-            continue
-        body[off + 2] = 0.0
-        changed = True
-        hidden += 1
-    if not changed:
-        return person, False, 0
-    new_person = dict(person)
-    new_person["pose_keypoints_2d"] = body
-    return new_person, True, hidden
-
-
-def _remove_hidden_face_landmarks(pose_keypoint, source_image, batch_index, head_confidence=0.25):
-    if not isinstance(pose_keypoint, dict):
-        return pose_keypoint
-    people = pose_keypoint.get("people", [])
-    if not people:
-        return pose_keypoint
-    image_bgr = _comfy_image_to_bgr(source_image, batch_index)
-    faces_meta = pose_keypoint.get("face_keypoints", {})
-    faces = faces_meta.get("faces", []) if isinstance(faces_meta, dict) else []
-    try:
-        heads = _detect_anime_heads(image_bgr, ANIMEHEADS_MODEL_RELATIVE_PATH, head_confidence) or []
-    except Exception as e:
-        print(f"[SAM3DBodyOpenPose] hidden face part cleanup skipped. Error: {e}")
-        return pose_keypoint
-    new_people, hidden_anchors = [], []
-    changed, hidden_parts = False, 0
-    for person in people:
-        anchor = _pose_person_head_anchor(person)
-        if anchor is None or not any(_animehead_matches_pose_head(head, anchor) for head in heads):
-            new_people.append(person)
-            continue
-        visible_face = _visible_face_for_pose_head(faces, anchor)
-        new_person, did_hide, count = _hide_invisible_openpose_face_parts(person, visible_face)
-        if did_hide:
-            changed = True
-            hidden_parts += count
-        if visible_face is None:
-            hidden_anchors.append(anchor)
-        new_people.append(new_person)
-    kept_faces, removed_faces = [], 0
-    for face in faces:
-        if any(_face_near_pose_head(face, anchor) for anchor in hidden_anchors):
-            removed_faces += 1
-            changed = True
-        else:
-            kept_faces.append(face)
-    if not changed:
-        return pose_keypoint
-    print(f"[SAM3DBodyOpenPose] Hidden invisible OpenPose nose/eye/ear parts: {hidden_parts}; removed {removed_faces} hidden face landmarks.")
-    out = dict(pose_keypoint)
-    out["people"] = new_people
-    if isinstance(faces_meta, dict):
-        meta = dict(faces_meta)
-        meta["faces"] = kept_faces
-        if kept_faces:
-            out["face_keypoints"] = meta
-        else:
-            out.pop("face_keypoints", None)
-    return out
+    anchor = points.mean(axis=0)
+    head_size = max((float(np.linalg.norm(a - b)) for a in points for b in points), default=0.0)
+    neck = body[1]
+    neck_distance = float(np.linalg.norm(anchor - neck[:2])) if neck[2] > 0 and np.isfinite(neck[:2]).all() else 0.0
+    return float(anchor[0]), float(anchor[1]), max(36.0, head_size * 2.8, neck_distance * 1.35)
 
 
 def _make_model_config(model_path, device):
@@ -816,32 +220,25 @@ def _make_body_shape_keypoint_from_outputs(outputs, width, height, confidence=1.
     return pose
 
 
-def _annotate_face_keypoints(pose_keypoint, source_image, batch_index, device="cuda", head_confidence=0.25):
-    image_bgr = _comfy_image_to_bgr(source_image, batch_index)
-    faces = _detect_anime_face_keypoints(image_bgr, device, pose_keypoint, head_confidence)
-    if faces:
-        pose_keypoint["face_keypoints"] = {"backend": "anime-face-detector", "model": "hysts/anime-face-detector", "faces": faces}
-    return pose_keypoint
+def _run_sam3d_estimator(estimator, image, bbox_threshold, inference_type, batch_index=0, person_threshold=0.5):
+    if __package__:
+        from .sam31_face import detect_people
+    else:
+        from sam31_face import detect_people
 
-
-def _run_sam3d_estimator(estimator, image, bbox_threshold, inference_type, batch_index=0, head_confidence=0.25, device="cuda"):
     img_rgb = _comfy_image_to_rgb(image, batch_index)
-    img_bgr = img_rgb[..., ::-1].copy()
     height, width = img_rgb.shape[:2]
-    bboxes = None
-    try:
-        bboxes, _targets = _body_boxes_from_heads_and_rtdetr(img_bgr, head_confidence, device)
-        if bboxes is not None and len(bboxes) > 0:
-            print(f"[SAM3DBodyOpenPose] Using AnimeHeads/RT-DETRv4 guided person boxes: {len(bboxes)}")
-    except Exception as e:
-        print(f"[SAM3DBodyOpenPose] guided person boxes skipped; using full image. Error: {e}")
-        bboxes = None
-    outputs = estimator.process_one_image(img_rgb, bboxes=bboxes, bbox_thr=bbox_threshold, inference_type=inference_type)
+    people = detect_people(img_rgb, threshold=person_threshold)
+    if not people:
+        raise RuntimeError("SAM3.1 did not detect any people in the image")
+    bboxes = np.asarray([person["box"] for person in people], dtype=np.float32)
+    masks = np.asarray([person["mask"] for person in people], dtype=np.uint8)
+    print(f"[SAM3DBodyOpenPose] Using SAM3.1 person boxes and masks: {len(people)}")
+    outputs = estimator.process_one_image(img_rgb, bboxes=bboxes, masks=masks,
+                                          bbox_thr=bbox_threshold, inference_type=inference_type)
     if not outputs:
-        outputs = estimator.process_one_image(img_rgb, bboxes=None, bbox_thr=bbox_threshold, inference_type=inference_type)
-    if not outputs:
-        raise RuntimeError("No people detected in image")
-    return _sort_outputs_top_left(outputs), width, height
+        raise RuntimeError("SAM3DBody could not estimate any SAM3.1 person regions")
+    return _sort_outputs_top_left(outputs), width, height, people
 
 
 def _debug_crops_to_image_tensor(_crops):
@@ -868,6 +265,23 @@ def _openpose_util():
     return module
 
 
+class SAM3DBodyOpenPoseBodyShapeAppend:
+    """Append one image or image batch to a chain of body-shape references."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"body_shape_image": ("IMAGE",)},
+                "optional": {"body_shape_images": (BODY_SHAPE_IMAGES_TYPE,)}}
+
+    RETURN_TYPES = (BODY_SHAPE_IMAGES_TYPE,)
+    RETURN_NAMES = ("body_shape_images",)
+    FUNCTION = "append"
+    CATEGORY = "SAM3DBody/openpose"
+
+    def append(self, body_shape_image, body_shape_images=None):
+        return (tuple(body_shape_images or ()) + (body_shape_image,),)
+
+
 class SAM3DBodyOpenPoseAnalyze:
     @classmethod
     def INPUT_TYPES(cls):
@@ -879,71 +293,71 @@ class SAM3DBodyOpenPoseAnalyze:
                 "inference_type": (["full", "body", "hand"], {"default": "full"}),
                 "confidence": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "auto_head_proportion": ("BOOLEAN", {"default": True}),
-                "head_confidence": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "person_threshold": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.05}),
             },
-            "optional": {"body_shape_image": ("IMAGE",)},
+            "optional": {"body_shape_image": ("IMAGE",),
+                         "body_shape_images": (BODY_SHAPE_IMAGES_TYPE,)},
         }
     RETURN_TYPES = ("POSE_KEYPOINT", "POSE_KEYPOINT", "IMAGE")
     RETURN_NAMES = ("pose_keypoint", "body_shape_keypoint", "debug_person_crops")
     FUNCTION = "analyze"
     CATEGORY = "SAM3DBody/openpose"
 
-    def analyze(self, pose_image, device="cuda", bbox_threshold=0.8, inference_type="full", confidence=1.0, auto_head_proportion=True, head_confidence=0.25, body_shape_image=None):
+    def analyze(self, pose_image, device="cuda", bbox_threshold=0.8, inference_type="full", confidence=1.0, auto_head_proportion=True, person_threshold=0.5, body_shape_image=None, body_shape_images=None):
         model_config = _make_model_config(DEFAULT_MODEL_PATH, device)
         loaded = _load_sam3d_model(model_config)
         from sam_3d_body import SAM3DBodyEstimator
         estimator = SAM3DBodyEstimator(loaded["model"], loaded["model_cfg"], human_detector=None, human_segmentor=None, fov_estimator=None)
-        pose_outputs, pose_width, pose_height = _run_sam3d_estimator(estimator, pose_image, bbox_threshold, inference_type, 0, head_confidence, device)
+        pose_outputs, pose_width, pose_height, pose_people = _run_sam3d_estimator(
+            estimator, pose_image, bbox_threshold, inference_type, 0, person_threshold)
         pose_pose = _make_openpose_keypoint_from_outputs(pose_outputs, pose_width, pose_height, confidence)
-        sam31_used = False
         try:
             from .sam31_face import detect_parts, update_pose
             anchors = [_pose_person_head_anchor(p) for p in pose_pose.get("people", [])]
             if anchors:
                 rgb = _comfy_image_to_rgb(pose_image, 0)
-                parts = detect_parts(rgb, anchors, person_boxes=_person_boxes_from_outputs(pose_outputs))
-                if any(candidates for head in parts for candidates in head.values()):
-                    pose_pose = update_pose(pose_pose, parts)
-                    sam31_used = True
-                else:
-                    print("[SAM3DBodyOpenPose] SAM3.1 found no face parts; using anime-face-detector fallback.")
+                parts = detect_parts(rgb, anchors, person_boxes=_person_boxes_from_outputs(pose_outputs),
+                                     person_candidates=pose_people)
+                pose_pose = update_pose(pose_pose, parts)
         except Exception as e:
-            print(f"[SAM3DBodyOpenPose] ComfyUI SAM3.1 face-part detection unavailable; using anime-face-detector. Error: {e}")
-        if not sam31_used:
-            try:
-                pose_pose = _annotate_face_keypoints(pose_pose, pose_image, 0, device, head_confidence)
-                pose_pose = _remove_hidden_face_landmarks(pose_pose, pose_image, 0, head_confidence)
-            except Exception as e:
-                print(f"[SAM3DBodyOpenPose] face landmark fallback skipped. Error: {e}")
+            print(f"[SAM3DBodyOpenPose] SAM3.1 face-part detection skipped. Error: {e}")
         body_shape_outputs = pose_outputs
         body_shape_face_people = []
-        if body_shape_image is not None:
-            collected = []
-            for batch_index in range(_image_batch_size(body_shape_image)):
+        if body_shape_image is not None or body_shape_images:
+            slots = []
+            for source, batch_index in _body_shape_frames(body_shape_image, body_shape_images):
+                if len(slots) >= len(pose_outputs):
+                    break
                 try:
-                    outs, shape_width, shape_height = _run_sam3d_estimator(estimator, body_shape_image, bbox_threshold, inference_type, batch_index, head_confidence, device)
-                    collected.extend(outs)
+                    outs, shape_width, shape_height, shape_people = _run_sam3d_estimator(
+                        estimator, source, bbox_threshold, inference_type, batch_index, person_threshold)
+                    face_people = [None] * len(outs)
                     if auto_head_proportion:
                         shape_pose = _make_openpose_keypoint_from_outputs(outs, shape_width, shape_height, confidence)
                         try:
                             from .sam31_face import detect_parts, update_pose
                             shape_anchors = [_pose_person_head_anchor(p) for p in shape_pose["people"]]
-                            shape_parts = detect_parts(_comfy_image_to_rgb(body_shape_image, batch_index), shape_anchors,
-                                                       person_boxes=_person_boxes_from_outputs(outs))
+                            shape_parts = detect_parts(_comfy_image_to_rgb(source, batch_index), shape_anchors,
+                                                       person_boxes=_person_boxes_from_outputs(outs),
+                                                       person_candidates=shape_people)
                             shape_pose = update_pose(shape_pose, shape_parts)
                         except Exception as e:
                             print(f"[SAM3DBodyOpenPose] body-shape face detection skipped for batch {batch_index}. Error: {e}")
-                        body_shape_face_people.extend(shape_pose["people"])
+                        face_people = shape_pose["people"]
+                    slots.extend(zip(outs, face_people))
                 except Exception as e:
-                    print(f"[SAM3DBodyOpenPose] body_shape_image batch {batch_index} skipped. Error: {e}")
-            if collected:
-                body_shape_outputs = collected[:len(pose_outputs)]
+                    print(f"[SAM3DBodyOpenPose] body-shape reference batch {batch_index} skipped. Error: {e}")
+                    slots.append((None, None))
+            body_shape_outputs, body_shape_face_people = _body_shape_slots_for_pose(
+                pose_outputs, pose_pose["people"], slots)
         body_shape_pose = _make_body_shape_keypoint_from_outputs(body_shape_outputs, pose_width, pose_height, confidence)
-        if auto_head_proportion:
-            from .sam31_face import adapt_pose_face_to_body_shape, match_body_shape_head_to_pose
-            if body_shape_face_people:
-                pose_pose = adapt_pose_face_to_body_shape(pose_pose, body_shape_face_people[:len(pose_outputs)])
-            body_shape_pose = match_body_shape_head_to_pose(body_shape_pose, pose_pose)
+        if body_shape_image is not None or body_shape_images:
+            if __package__:
+                from .sam31_face import normalize_body_shape_to_pose
+            else:
+                from sam31_face import normalize_body_shape_to_pose
+            body_shape_pose = normalize_body_shape_to_pose(
+                body_shape_pose, pose_pose, body_shape_face_people if auto_head_proportion else None)
         return ([pose_pose], [body_shape_pose], _debug_crops_to_image_tensor([]))
 
 
@@ -973,13 +387,46 @@ class SAM3DBodyOpenPoseRender:
                 for person in frame.get("people", [])
             ]
             draw_frames.append(draw_frame)
-        pose_result = util.draw_pose_json(json.dumps(draw_frames), render_width, use_ground_plane, show_body, show_face, show_hands, pose_marker_size, face_marker_size, hand_marker_size, pelvis_scale, torso_scale, neck_scale, head_scale, eye_distance_scale, 0.0, 0.0, left_eye_scale, right_eye_scale, left_eyebrow_scale, right_eyebrow_scale, mouth_scale, nose_scale_face, face_shape_scale, shoulder_scale, arm_scale, leg_scale, hands_scale, overall_scale, 0.0, offset_x, offset_y, target_pose_keypoint_obj=body_shape_keypoint)
-        pose_imgs = pose_result[0] or [np.zeros((render_height, render_width, 3), dtype=np.uint8)]
+        def draw(frames_to_draw, target):
+            return util.draw_pose_json(json.dumps(frames_to_draw), render_width, use_ground_plane,
+                                       show_body, show_face, show_hands, pose_marker_size, face_marker_size,
+                                       hand_marker_size, pelvis_scale, torso_scale, neck_scale, head_scale,
+                                       eye_distance_scale, 0.0, 0.0, left_eye_scale, right_eye_scale,
+                                       left_eyebrow_scale, right_eyebrow_scale, mouth_scale, nose_scale_face,
+                                       face_shape_scale, shoulder_scale, arm_scale, leg_scale, hands_scale,
+                                       overall_scale, 0.0, offset_x, offset_y,
+                                       target_pose_keypoint_obj=target)[0]
+
+        if body_shape_keypoint is None:
+            pose_imgs = draw(draw_frames, None)
+        else:
+            target_frames = body_shape_keypoint if isinstance(body_shape_keypoint, list) else [body_shape_keypoint]
+            pose_imgs = []
+            for frame_index, frame in enumerate(draw_frames):
+                if not isinstance(frame, dict):
+                    pose_imgs.extend(draw([frame], None))
+                    continue
+                target_frame = target_frames[min(frame_index, len(target_frames) - 1)] if target_frames else None
+                target_people = target_frame.get("people", []) if isinstance(target_frame, dict) else []
+                canvas = None
+                for person_index, person in enumerate(frame.get("people", [])):
+                    single_frame = {**frame, "people": [person]}
+                    single_target = ([{**target_frame, "people": [target_people[person_index]]}]
+                                     if person_index < len(target_people) else None)
+                    images = draw([single_frame], single_target)
+                    if images:
+                        canvas = images[0] if canvas is None else np.maximum(canvas, images[0])
+                pose_imgs.append(canvas if canvas is not None else np.zeros((render_height, render_width, 3), dtype=np.uint8))
+        pose_imgs = pose_imgs or [np.zeros((render_height, render_width, 3), dtype=np.uint8)]
         if render_height > 0:
             import cv2
             pose_imgs = [cv2.resize(img, (render_width, render_height), interpolation=cv2.INTER_AREA) if img.shape[0] != render_height or img.shape[1] != render_width else img for img in pose_imgs]
         return (torch.from_numpy(np.asarray(pose_imgs).astype(np.float32) / 255.0),)
 
 
-NODE_CLASS_MAPPINGS = {"SAM3DBodyOpenPoseAnalyze": SAM3DBodyOpenPoseAnalyze, "SAM3DBodyOpenPoseRender": SAM3DBodyOpenPoseRender}
-NODE_DISPLAY_NAME_MAPPINGS = {"SAM3DBodyOpenPoseAnalyze": "SAM3D Body OpenPose Analyze", "SAM3DBodyOpenPoseRender": "SAM3D Body OpenPose Render"}
+NODE_CLASS_MAPPINGS = {"SAM3DBodyOpenPoseAnalyze": SAM3DBodyOpenPoseAnalyze,
+                       "SAM3DBodyOpenPoseBodyShapeAppend": SAM3DBodyOpenPoseBodyShapeAppend,
+                       "SAM3DBodyOpenPoseRender": SAM3DBodyOpenPoseRender}
+NODE_DISPLAY_NAME_MAPPINGS = {"SAM3DBodyOpenPoseAnalyze": "SAM3D Body OpenPose Analyze",
+                              "SAM3DBodyOpenPoseBodyShapeAppend": "SAM3D Body Shape Images (Append)",
+                              "SAM3DBodyOpenPoseRender": "SAM3D Body OpenPose Render"}

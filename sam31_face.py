@@ -29,6 +29,7 @@ _CHECKPOINT_REPO = "Comfy-Org/sam3.1"
 _CHECKPOINT_FILENAME = "checkpoints/sam3.1_multiplex_fp16.safetensors"
 _download_lock = Lock()
 _loaded = None
+_attention_fallback_logged = False
 
 
 def ensure_checkpoint():
@@ -78,6 +79,34 @@ def _text_embedding(clip, prompt, device, dtype):
     else:
         mask = mask.to(device)
     return emb, mask
+
+
+def _run_network(network, frame, embedding, text_mask, threshold, orig_size):
+    """Retry SAM3.1 with PyTorch attention when this xFormers build rejects the GPU."""
+    global _attention_fallback_logged
+    arguments = {"text_embeddings": embedding, "text_mask": text_mask,
+                 "threshold": threshold, "orig_size": orig_size}
+    try:
+        return network(frame, **arguments)
+    except NotImplementedError as error:
+        if "No operator found for" not in str(error) or "memory_efficient_attention_forward" not in str(error):
+            raise
+        import comfy.ldm.modules.attention as attention
+        import comfy.ldm.sam3.detector as detector
+        import comfy.ldm.sam3.sam as sam
+        import comfy.ldm.sam3.tracker as tracker
+
+        changed = False
+        for module in (detector, sam, tracker):
+            if module.optimized_attention is attention.attention_xformers:
+                module.optimized_attention = attention.attention_pytorch
+                changed = True
+        if not changed:
+            raise
+        if not _attention_fallback_logged:
+            print("[SAM3DBodyOpenPose] xFormers cannot run SAM3.1 on this GPU; using PyTorch attention for SAM3.1.")
+            _attention_fallback_logged = True
+        return network(frame, **arguments)
 
 
 def _crop_from_anchor(anchor, width, height):
@@ -224,8 +253,7 @@ def detect_people(image, threshold=0.5):
     frame = comfy.utils.common_upscale(frame, 1008, 1008, "bilinear", crop="disabled").to(device=device, dtype=dtype)
     embedding, text_mask = _text_embedding(clip, PART_PROMPTS["person"], device, dtype)
     with torch.inference_mode():
-        result = model.model.diffusion_model(frame, text_embeddings=embedding, text_mask=text_mask,
-                                             threshold=threshold, orig_size=(h, w))
+        result = _run_network(model.model.diffusion_model, frame, embedding, text_mask, threshold, (h, w))
     return _person_candidates(result, w, h, threshold)
 
 
@@ -252,8 +280,7 @@ def detect_parts(image, anchors, threshold=0.5, person_boxes=None, person_candid
                     full_frame = torch.from_numpy(image[:, :, :3].copy()).float().div_(255).permute(2, 0, 1).unsqueeze(0)
                     full_frame = comfy.utils.common_upscale(full_frame, 1008, 1008, "bilinear", crop="disabled").to(device=device, dtype=dtype)
                     emb, text_mask = embeddings["person"]
-                    person_result = network(full_frame, text_embeddings=emb, text_mask=text_mask,
-                                            threshold=threshold, orig_size=(h, w))
+                    person_result = _run_network(network, full_frame, emb, text_mask, threshold, (h, w))
                     candidates = _person_candidates(person_result, w, h, threshold)
                 else:
                     candidates = person_candidates
@@ -273,7 +300,7 @@ def detect_parts(image, anchors, threshold=0.5, person_boxes=None, person_candid
             parts = {}
             for name in ("face", "eye", "closed_eye", "eyebrow", "nose", "mouth", "closed_mouth", "ear"):
                 emb, mask = embeddings[name]
-                result = network(frame, text_embeddings=emb, text_mask=mask, threshold=threshold, orig_size=(y2-y1, x2-x1))
+                result = _run_network(network, frame, emb, mask, threshold, (y2-y1, x2-x1))
                 parts[name] = _part_candidates(result, crop, threshold, 0.95 if name == "face" else 0.55,
                                                name in ("face", "eye", "closed_eye", "eyebrow", "mouth", "closed_mouth"))
             needed = (["eyepatch", "glasses"] if len(parts["eye"]) + len(parts["closed_eye"]) < 2 else [])
@@ -281,7 +308,7 @@ def detect_parts(image, anchors, threshold=0.5, person_boxes=None, person_candid
                 needed.append("mask")
             for name in needed:
                 emb, mask = embeddings[name]
-                result = network(frame, text_embeddings=emb, text_mask=mask, threshold=threshold, orig_size=(y2-y1, x2-x1))
+                result = _run_network(network, frame, emb, mask, threshold, (y2-y1, x2-x1))
                 parts[name] = _part_candidates(result, crop, threshold)
             detections.append(parts)
     return detections
@@ -754,20 +781,97 @@ def update_pose(pose, detections):
 
 
 def match_body_shape_head_to_pose(body_shape_pose, pose):
-    """Keep measured head geometry when body shape is used as a render target."""
+    """Keep measured head geometry in the reference person's local neck frame."""
     people = []
     for target, source in zip(body_shape_pose.get("people", []), pose.get("people", [])):
         target = dict(target)
         target_points = list(target.get("pose_keypoints_2d", []))
         source_points = source.get("pose_keypoints_2d", [])
         if len(target_points) >= 54 and len(source_points) >= 54:
-            for index in (0, 14, 15, 16, 17):
-                offset = index * 3
-                target_points[offset:offset + 3] = source_points[offset:offset + 3]
-            target["pose_keypoints_2d"] = target_points
+            source_neck = np.asarray(source_points[3:5], dtype=float)
+            target_neck = np.asarray(target_points[3:5], dtype=float)
+            if (source_points[5] > 0 and target_points[5] > 0
+                    and np.isfinite(source_neck).all() and np.isfinite(target_neck).all()):
+                for index in (0, 14, 15, 16, 17):
+                    offset = index * 3
+                    point = np.asarray(source_points[offset:offset + 2], dtype=float)
+                    if source_points[offset + 2] > 0 and np.isfinite(point).all():
+                        target_points[offset:offset + 2] = (target_neck + point - source_neck).tolist()
+                        target_points[offset + 2] = source_points[offset + 2]
+                    else:
+                        target_points[offset:offset + 3] = [0.0, 0.0, 0.0]
+                target["pose_keypoints_2d"] = target_points
         people.append(target)
     people.extend(body_shape_pose.get("people", [])[len(people):])
     result = dict(body_shape_pose)
+    result["people"] = people
+    return result
+
+
+def normalize_body_shape_to_pose(body_shape_pose, pose, face_people=None):
+    """Express each reference's body ratios in its source person's pixel scale.
+
+    SAM3DBody's head landmarks tend to stay small on chibi art, so use the
+    SAM3.1 face width for the head ratio when it is available.
+    """
+    result = dict(body_shape_pose)
+    people = []
+    for index, (target, source) in enumerate(zip(body_shape_pose.get("people", []), pose.get("people", []))):
+        source_torso, target_torso = _torso_length(source), _torso_length(target)
+        if not source_torso or not target_torso:
+            people.append(target)
+            continue
+        target = dict(target)
+        source_face = _face_dimensions(source)
+        face_target = face_people[index] if face_people and index < len(face_people) else None
+        target_face = _face_dimensions(face_target) if face_target else None
+        head_scale = 1.0
+        factor = source_torso / target_torso
+        if source_face and target_face and source_face[2] == target_face[2]:
+            face_ratio = float(np.clip((target_face[0] / target_torso) /
+                                       (source_face[0] / source_torso), 0.75, 4.0))
+            # Keep the output head near twice the original size. A chibi
+            # reference then shortens the torso and limbs to preserve its ratio.
+            head_scale = min(2.0, face_ratio)
+            factor *= min(1.0, 2.0 / face_ratio)
+        source_body = np.asarray(source.get("pose_keypoints_2d", []), dtype=float).reshape(-1, 3)
+        target_body = np.asarray(target.get("pose_keypoints_2d", []), dtype=float).reshape(-1, 3).copy()
+        if len(source_body) < 18 or len(target_body) < 18:
+            people.append(target)
+            continue
+        source_neck = source_body[1, :2]
+        target_neck = target_body[1, :2].copy()
+        original_nose = target_body[0, :2].copy()
+        for key in ("pose_keypoints_2d", "hand_left_keypoints_2d", "hand_right_keypoints_2d"):
+            points = np.asarray(target.get(key, []), dtype=float).reshape(-1, 3).copy()
+            if len(points):
+                valid = (points[:, 2] > 0) & np.isfinite(points[:, :2]).all(axis=1)
+                points[valid, :2] = target_neck + (points[valid, :2] - target_neck) * factor
+                target[key] = points.reshape(-1).tolist()
+                if key == "pose_keypoints_2d":
+                    target_body = points
+
+        neck_scale = 1.0
+        source_neck_length = float(np.linalg.norm(source_body[0, :2] - source_neck))
+        if source_body[0, 2] > 0 and target_body[0, 2] > 0 and source_neck_length > 1:
+            neck_scale = float(np.clip(np.linalg.norm(original_nose - target_neck) * factor /
+                                       source_neck_length, 0.7, 1.8))
+        if source_body[0, 2] > 0:
+            nose = target_neck + (source_body[0, :2] - source_neck) * neck_scale
+            target_body[0, :2] = nose
+            target_body[0, 2] = source_body[0, 2]
+            for point_index in (14, 15, 16, 17):
+                if source_body[point_index, 2] > 0:
+                    target_body[point_index, :2] = nose + (source_body[point_index, :2] - source_body[0, :2]) * head_scale
+                    target_body[point_index, 2] = source_body[point_index, 2]
+                else:
+                    target_body[point_index] = 0.0
+        else:
+            for point_index in (0, 14, 15, 16, 17):
+                target_body[point_index] = 0.0
+        target["pose_keypoints_2d"] = target_body.reshape(-1).tolist()
+        people.append(target)
+    people.extend(body_shape_pose.get("people", [])[len(people):])
     result["people"] = people
     return result
 

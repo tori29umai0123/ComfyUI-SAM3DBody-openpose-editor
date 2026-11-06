@@ -270,14 +270,43 @@ class Sam31FacePoseTests(unittest.TestCase):
     def test_body_shape_keeps_measured_head_size(self):
         source = person()
         target = person()
+        source["pose_keypoints_2d"][1*3:1*3+3] = [50.0, 80.0, .9]
+        target["pose_keypoints_2d"][1*3:1*3+3] = [300.0, 400.0, .9]
         target["pose_keypoints_2d"][14*3:14*3+3] = [47.0, 48.0, .9]
         target["pose_keypoints_2d"][2*3:2*3+3] = [20.0, 80.0, .9]
         shape = {"people": [target], "sam3dbody_people": [{"format": "mhr70"}]}
         result = sam31_face.match_body_shape_head_to_pose(shape, {"people": [source]})
-        self.assertEqual(result["people"][0]["pose_keypoints_2d"][14*3:14*3+3], source["pose_keypoints_2d"][14*3:14*3+3])
+        self.assertEqual(result["people"][0]["pose_keypoints_2d"][14*3:14*3+3], [290.0, 365.0, .9])
+        self.assertEqual(result["people"][0]["pose_keypoints_2d"][0:3], [300.0, 375.0, .9])
         self.assertEqual(result["people"][0]["pose_keypoints_2d"][2*3:2*3+3], [20.0, 80.0, .9])
         self.assertEqual(target["pose_keypoints_2d"][14*3:14*3+3], [47.0, 48.0, .9])
         self.assertEqual(result["sam3dbody_people"], shape["sam3dbody_people"])
+
+    def test_chibi_reference_is_normalized_by_face_to_torso_ratio(self):
+        def make_person(torso, face_width, leg_length):
+            item = person()
+            body = item["pose_keypoints_2d"]
+            for index, x, y in ((1, 50, 100), (8, 40, 100 + torso),
+                                (11, 60, 100 + torso), (9, 40, 100 + torso + leg_length),
+                                (12, 60, 100 + torso + leg_length)):
+                body[index * 3:index * 3 + 3] = [x, y, .9]
+            face = [0.0] * 210
+            for index, x, y in ((0, 50 - face_width / 2, 55),
+                                (8, 50, 80), (16, 50 + face_width / 2, 55),
+                                (17, 50, 40)):
+                face[index * 3:index * 3 + 3] = [x, y, .9]
+            item["face_keypoints_2d"] = face
+            return item
+
+        source = make_person(100, 40, 100)
+        target = make_person(200, 320, 100)
+        result = sam31_face.normalize_body_shape_to_pose(
+            {"people": [target]}, {"people": [source]}, [target])
+        body = np.asarray(result["people"][0]["pose_keypoints_2d"]).reshape(-1, 3)
+        self.assertAlmostEqual(body[8, 1] - body[1, 1], 50)
+        self.assertAlmostEqual(body[9, 1] - body[8, 1], 25)
+        self.assertAlmostEqual(np.linalg.norm(body[17, :2] - body[16, :2]), 100)
+        self.assertAlmostEqual(target["pose_keypoints_2d"][8 * 3 + 1], 300)
 
     def test_face_proportions_follow_body_shape_reference(self):
         def with_face(left, right, brow_y, chin_y):
