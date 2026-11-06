@@ -38,7 +38,7 @@ def _track_data_for_images(images, threshold, max_objects, detect_interval):
 
 
 def regions_from_track_data(track_data, frame_count, height, width):
-    """Return visible person masks in stable first-appearance, top-left order."""
+    """Return visible person masks with IDs assigned left to right on first appearance."""
     from comfy.ldm.sam3.tracker import unpack_masks
 
     if not isinstance(track_data, dict) or int(track_data.get("n_frames", -1)) != frame_count:
@@ -72,7 +72,7 @@ def regions_from_track_data(track_data, frame_count, height, width):
                             "score": float(scores[track_index]) if track_index < len(scores) else 1.0,
                             "sam3_track_index": track_index})
         newcomers = sorted((region for region in visible if region["sam3_track_index"] not in track_to_slot),
-                           key=lambda region: (region["box"][1], region["box"][0]))
+                           key=lambda region: (region["box"][0], region["box"][1]))
         for region in newcomers:
             track_to_slot[region["sam3_track_index"]] = len(track_to_slot)
         for region in visible:
