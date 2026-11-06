@@ -21,6 +21,54 @@ def person():
 
 
 class Sam31FacePoseTests(unittest.TestCase):
+    def test_two_people_keep_their_own_face_parts(self):
+        left = person()
+        right = person()
+        right["pose_keypoints_2d"] = list(right["pose_keypoints_2d"])
+        for offset in range(0, 54, 3):
+            right["pose_keypoints_2d"][offset] += 100
+        result = update_pose({"people": [left, right]}, [
+            {"eye": [point(40, 45), point(60, 45)], "nose": [point(50, 55)]},
+            {"eye": [point(140, 45), point(160, 45)], "nose": [point(150, 55)]},
+        ])
+        self.assertEqual(len(result["people"]), 2)
+        self.assertEqual(result["people"][0]["pose_keypoints_2d"][0], 50.0)
+        self.assertEqual(result["people"][1]["pose_keypoints_2d"][0], 150.0)
+
+    def test_person_masks_match_body_boxes_and_hide_neighbors(self):
+        image = np.full((100, 200, 3), 220, dtype=np.uint8)
+        left_mask = np.zeros((100, 200), dtype=bool)
+        right_mask = np.zeros((100, 200), dtype=bool)
+        left_mask[:, :95] = True
+        right_mask[:, 105:] = True
+        candidates = [
+            {"box": [100, 0, 200, 100], "mask": right_mask, "score": .9},
+            {"box": [0, 0, 100, 100], "mask": left_mask, "score": .8},
+        ]
+        regions = sam31_face._assign_person_regions(
+            [(40, 35, 40), (160, 35, 40)],
+            [[0, 0, 100, 100], [100, 0, 200, 100]], candidates)
+        self.assertIs(regions[0], candidates[1])
+        self.assertIs(regions[1], candidates[0])
+        crop = sam31_face._masked_person_crop(image, (40, 10, 160, 90), regions[0])
+        self.assertEqual(int(crop[20, 10, 0]), 220)
+        self.assertEqual(int(crop[20, 110, 0]), 114)
+
+    def test_person_candidates_keep_individual_probability_masks(self):
+        scores = torch.tensor([[5.0, 5.0]])
+        boxes = torch.tensor([[[0.0, 0.0, 100.0, 100.0],
+                               [100.0, 0.0, 200.0, 100.0]]])
+        masks = torch.zeros((1, 2, 100, 200))
+        masks[0, 0, :, :95] = 1.0
+        masks[0, 1, :, 105:] = 1.0
+        candidates = sam31_face._person_candidates(
+            {"scores": scores, "boxes": boxes, "masks": masks}, 200, 100, .5)
+        self.assertEqual(len(candidates), 2)
+        self.assertTrue(candidates[0]["mask"][50, 40])
+        self.assertFalse(candidates[0]["mask"][50, 160])
+        self.assertTrue(candidates[1]["mask"][50, 160])
+        self.assertFalse(candidates[1]["mask"][50, 40])
+
     def test_rear_head_hides_facial_bones(self):
         pose = update_pose({"people": [person()]}, [{"ear": [point(25, 48)]}])
         body = pose["people"][0]["pose_keypoints_2d"]

@@ -10,6 +10,7 @@ __pycache__/
 *.pt
 /*.png
 /hf_rtmdet_ins_onnx/
+/validation/
 
 # Historical working copies; the active implementation is nodes.py.
 /nodes_before_*.py

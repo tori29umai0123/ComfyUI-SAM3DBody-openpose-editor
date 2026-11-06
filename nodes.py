@@ -214,9 +214,15 @@ def _nms_dict_boxes(items, iou_thr):
 
 
 def _detect_rtdetrv4_body_persons(image_bgr, score_thr=RTDETRV4_BODY_SCORE_THRESHOLD):
+    import cv2
+
     session = _load_rtdetrv4_body_session()
     image_rgb = image_bgr[..., ::-1].copy()
-    labels, boxes, scores = session.run(None, {"image": image_rgb[None, ...]})
+    height, width = image_rgb.shape[:2]
+    resized = cv2.resize(image_rgb, (1280, 1280), interpolation=cv2.INTER_LINEAR)
+    images = np.transpose(resized.astype(np.float32) / 255.0, (2, 0, 1))[None, ...]
+    target_sizes = np.asarray([[width, height]], dtype=np.int64)
+    labels, boxes, scores = session.run(None, {"images": images, "orig_target_sizes": target_sizes})
     labels = np.asarray(labels[0])
     boxes = np.asarray(boxes[0], dtype=np.float32)
     scores = np.asarray(scores[0], dtype=np.float32)
@@ -777,6 +783,15 @@ def _output_bbox(output):
     return {"min_x": min(x1, x2), "min_y": min(y1, y2), "width": abs(x2 - x1), "height": abs(y2 - y1)}
 
 
+def _person_boxes_from_outputs(outputs):
+    boxes = []
+    for output in outputs:
+        bbox = _output_bbox(output)
+        boxes.append(None if bbox is None else [bbox["min_x"], bbox["min_y"],
+                                                bbox["min_x"] + bbox["width"], bbox["min_y"] + bbox["height"]])
+    return boxes
+
+
 def _sort_outputs_top_left(outputs):
     indexed = []
     for i, output in enumerate(outputs or []):
@@ -886,7 +901,7 @@ class SAM3DBodyOpenPoseAnalyze:
             anchors = [_pose_person_head_anchor(p) for p in pose_pose.get("people", [])]
             if anchors:
                 rgb = _comfy_image_to_rgb(pose_image, 0)
-                parts = detect_parts(rgb, anchors)
+                parts = detect_parts(rgb, anchors, person_boxes=_person_boxes_from_outputs(pose_outputs))
                 if any(candidates for head in parts for candidates in head.values()):
                     pose_pose = update_pose(pose_pose, parts)
                     sam31_used = True
@@ -913,7 +928,8 @@ class SAM3DBodyOpenPoseAnalyze:
                         try:
                             from .sam31_face import detect_parts, update_pose
                             shape_anchors = [_pose_person_head_anchor(p) for p in shape_pose["people"]]
-                            shape_parts = detect_parts(_comfy_image_to_rgb(body_shape_image, batch_index), shape_anchors)
+                            shape_parts = detect_parts(_comfy_image_to_rgb(body_shape_image, batch_index), shape_anchors,
+                                                       person_boxes=_person_boxes_from_outputs(outs))
                             shape_pose = update_pose(shape_pose, shape_parts)
                         except Exception as e:
                             print(f"[SAM3DBodyOpenPose] body-shape face detection skipped for batch {batch_index}. Error: {e}")

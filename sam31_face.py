@@ -11,6 +11,7 @@ import torch
 
 
 PART_PROMPTS = {
+    "person": "person",
     "face": "face",
     "eye": "eye",
     "closed_eye": "closed eye",
@@ -126,7 +127,109 @@ def _part_candidates(results, crop, threshold, max_fraction=0.55, include_outlin
     return kept
 
 
-def detect_parts(image, anchors, threshold=0.5):
+def _person_candidates(results, width, height, threshold):
+    """Extract SAM3.1 person boxes and masks in full-image coordinates."""
+    import cv2
+
+    scores = results["scores"][0].sigmoid().detach().float().cpu().numpy()
+    boxes = results["boxes"][0].detach().float().cpu().numpy()
+    masks = results.get("masks")
+    if masks is None:
+        return []
+    found = []
+    for index, (box, score) in enumerate(zip(boxes, scores)):
+        if score < threshold:
+            continue
+        x1, y1, x2, y2 = [float(v) for v in box]
+        if not np.isfinite([x1, y1, x2, y2]).all() or x2 - x1 < 12 or y2 - y1 < 12:
+            continue
+        mask = masks[0][index].detach().float().cpu().numpy().squeeze()
+        if mask.ndim != 2:
+            continue
+        mask = cv2.resize(mask, (width, height), interpolation=cv2.INTER_LINEAR)
+        mask = mask > (0.5 if mask.min() >= 0 and mask.max() <= 1 else 0.0)
+        if np.count_nonzero(mask) < 100:
+            continue
+        found.append({"box": [x1, y1, x2, y2], "mask": mask, "score": float(score)})
+    return sorted(found, key=lambda item: item["score"], reverse=True)
+
+
+def _box_iou(a, b):
+    if a is None or b is None:
+        return 0.0
+    ax1, ay1, ax2, ay2 = a
+    bx1, by1, bx2, by2 = b
+    intersection = max(0.0, min(ax2, bx2) - max(ax1, bx1)) * max(0.0, min(ay2, by2) - max(ay1, by1))
+    union = max(1.0, (ax2-ax1)*(ay2-ay1) + (bx2-bx1)*(by2-by1) - intersection)
+    return intersection / union
+
+
+def _assign_person_regions(anchors, person_boxes, candidates):
+    """Match SAM3.1 person masks to SAM3D people without reusing a mask."""
+    pairs = []
+    for person_index, anchor in enumerate(anchors):
+        if anchor is None:
+            continue
+        x, y, radius = anchor
+        reference = person_boxes[person_index] if person_boxes and person_index < len(person_boxes) else None
+        for candidate_index, candidate in enumerate(candidates):
+            box = candidate["box"]
+            height, width = candidate["mask"].shape
+            ix, iy = int(round(x)), int(round(y))
+            on_mask = 0 <= ix < width and 0 <= iy < height and bool(candidate["mask"][iy, ix])
+            in_box = box[0] <= x <= box[2] and box[1] <= y <= box[3]
+            overlap = _box_iou(reference, box)
+            if not (on_mask or in_box or overlap > 0.05):
+                continue
+            distance = np.hypot(x - (box[0]+box[2])*0.5, y - box[1]) / max(radius, box[2]-box[0], 1.0)
+            score = 4.0 * overlap + 2.0 * on_mask + 0.5 * in_box - 0.1 * distance
+            pairs.append((score, person_index, candidate_index))
+    assigned = [None] * len(anchors)
+    used = set()
+    for _, person_index, candidate_index in sorted(pairs, reverse=True):
+        if assigned[person_index] is None and candidate_index not in used:
+            assigned[person_index] = candidates[candidate_index]
+            used.add(candidate_index)
+    return assigned
+
+
+def _masked_person_crop(image, crop, region):
+    """Hide neighboring people before running face-part prompts."""
+    import cv2
+
+    x1, y1, x2, y2 = crop
+    frame = image[y1:y2, x1:x2, :3].copy()
+    if region is None:
+        return frame
+    mask = region["mask"][y1:y2, x1:x2].astype(np.uint8)
+    margin = max(3, int(round(min(x2-x1, y2-y1) * 0.06)))
+    mask = cv2.dilate(mask, np.ones((margin, margin), dtype=np.uint8)) > 0
+    frame[~mask] = 114
+    return frame
+
+
+def detect_people(image, threshold=0.5):
+    """Detect full-image person instances for optional mask-conditioned SAM3DBody inference."""
+    import comfy.model_management
+    import comfy.utils
+
+    model, clip = load_model_and_clip()
+    if getattr(model.model.model_config, "unet_config", {}).get("image_model") != "SAM31":
+        raise ValueError("The person detector requires a SAM3.1 MODEL")
+    comfy.model_management.load_model_gpu(model)
+    device = comfy.model_management.get_torch_device()
+    dtype = model.model.get_dtype()
+    h, w = image.shape[:2]
+    frame = torch.from_numpy(image[:, :, :3].copy()).float().div_(255).permute(2, 0, 1).unsqueeze(0)
+    frame = comfy.utils.common_upscale(frame, 1008, 1008, "bilinear", crop="disabled").to(device=device, dtype=dtype)
+    embedding, text_mask = _text_embedding(clip, PART_PROMPTS["person"], device, dtype)
+    with torch.inference_mode():
+        result = model.model.diffusion_model(frame, text_embeddings=embedding, text_mask=text_mask,
+                                             threshold=threshold, orig_size=(h, w))
+    return _person_candidates(result, w, h, threshold)
+
+
+def detect_parts(image, anchors, threshold=0.5, person_boxes=None, person_candidates=None):
     """Return per-head detections in original image coordinates."""
     import comfy.model_management
     import comfy.utils
@@ -138,16 +241,34 @@ def detect_parts(image, anchors, threshold=0.5):
     dtype = model.model.get_dtype()
     network = model.model.diffusion_model
     h, w = image.shape[:2]
-    embeddings = {name: _text_embedding(clip, prompt, device, dtype) for name, prompt in PART_PROMPTS.items()}
+    embeddings = {name: _text_embedding(clip, prompt, device, dtype)
+                  for name, prompt in PART_PROMPTS.items() if name != "person" or len(anchors) > 1}
     detections = []
     with torch.inference_mode():
-        for anchor in anchors:
+        regions = [None] * len(anchors)
+        if len(anchors) > 1:
+            try:
+                if person_candidates is None:
+                    full_frame = torch.from_numpy(image[:, :, :3].copy()).float().div_(255).permute(2, 0, 1).unsqueeze(0)
+                    full_frame = comfy.utils.common_upscale(full_frame, 1008, 1008, "bilinear", crop="disabled").to(device=device, dtype=dtype)
+                    emb, text_mask = embeddings["person"]
+                    person_result = network(full_frame, text_embeddings=emb, text_mask=text_mask,
+                                            threshold=threshold, orig_size=(h, w))
+                    candidates = _person_candidates(person_result, w, h, threshold)
+                else:
+                    candidates = person_candidates
+                regions = _assign_person_regions(anchors, person_boxes, candidates)
+                print(f"[SAM3DBodyOpenPose] SAM3.1 person masks matched: {sum(region is not None for region in regions)}/{len(anchors)}")
+            except Exception as error:
+                print(f"[SAM3DBodyOpenPose] SAM3.1 person masks unavailable; using head crops. Error: {error}")
+        for person_index, anchor in enumerate(anchors):
             crop = _crop_from_anchor(anchor, w, h) if anchor is not None else None
             if crop is None:
                 detections.append({})
                 continue
             x1, y1, x2, y2 = crop
-            frame = torch.from_numpy(image[y1:y2, x1:x2, :3].copy()).float().div_(255).permute(2, 0, 1).unsqueeze(0)
+            person_image = _masked_person_crop(image, crop, regions[person_index])
+            frame = torch.from_numpy(person_image).float().div_(255).permute(2, 0, 1).unsqueeze(0)
             frame = comfy.utils.common_upscale(frame, 1008, 1008, "bilinear", crop="disabled").to(device=device, dtype=dtype)
             parts = {}
             for name in ("face", "eye", "closed_eye", "eyebrow", "nose", "mouth", "closed_mouth", "ear"):
