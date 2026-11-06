@@ -780,34 +780,6 @@ def update_pose(pose, detections):
     return out
 
 
-def match_body_shape_head_to_pose(body_shape_pose, pose):
-    """Keep measured head geometry in the reference person's local neck frame."""
-    people = []
-    for target, source in zip(body_shape_pose.get("people", []), pose.get("people", [])):
-        target = dict(target)
-        target_points = list(target.get("pose_keypoints_2d", []))
-        source_points = source.get("pose_keypoints_2d", [])
-        if len(target_points) >= 54 and len(source_points) >= 54:
-            source_neck = np.asarray(source_points[3:5], dtype=float)
-            target_neck = np.asarray(target_points[3:5], dtype=float)
-            if (source_points[5] > 0 and target_points[5] > 0
-                    and np.isfinite(source_neck).all() and np.isfinite(target_neck).all()):
-                for index in (0, 14, 15, 16, 17):
-                    offset = index * 3
-                    point = np.asarray(source_points[offset:offset + 2], dtype=float)
-                    if source_points[offset + 2] > 0 and np.isfinite(point).all():
-                        target_points[offset:offset + 2] = (target_neck + point - source_neck).tolist()
-                        target_points[offset + 2] = source_points[offset + 2]
-                    else:
-                        target_points[offset:offset + 3] = [0.0, 0.0, 0.0]
-                target["pose_keypoints_2d"] = target_points
-        people.append(target)
-    people.extend(body_shape_pose.get("people", [])[len(people):])
-    result = dict(body_shape_pose)
-    result["people"] = people
-    return result
-
-
 def normalize_body_shape_to_pose(body_shape_pose, pose, face_people=None):
     """Express each reference's body ratios in its source person's pixel scale.
 
@@ -918,56 +890,3 @@ def _face_axes(person):
             horizontal /= length
             return horizontal, np.array([-horizontal[1], horizontal[0]])
     return np.array([1.0, 0.0]), np.array([0.0, 1.0])
-
-
-def adapt_pose_face_to_body_shape(pose, body_shape_face_people):
-    """Transfer face-to-torso proportions while keeping pose and expression."""
-    adjusted = []
-    changed = False
-    for source, target in zip(pose.get("people", []), body_shape_face_people):
-        source_size, target_size = _face_dimensions(source), _face_dimensions(target)
-        source_torso, target_torso = _torso_length(source), _torso_length(target)
-        if not (source_size and target_size and source_torso and target_torso) or source_size[2] != target_size[2]:
-            adjusted.append(source)
-            continue
-        scale_x = float(np.clip((target_size[0] / target_torso) / (source_size[0] / source_torso), .65, 1.6))
-        scale_y = float(np.clip((target_size[1] / target_torso) / (source_size[1] / source_torso), .65, 1.6))
-        face = list(source["face_keypoints_2d"])
-        anchor_index = next((index for index in (30, 33, 36, 42, 8) if face[index * 3 + 2] > 0), None)
-        if anchor_index is None:
-            adjusted.append(source)
-            continue
-        anchor_x, anchor_y = face[anchor_index * 3:anchor_index * 3 + 2]
-        horizontal, vertical = _face_axes(source)
-        anchor = np.array([anchor_x, anchor_y])
-        for index in range(70):
-            offset = index * 3
-            if face[offset + 2] > 0:
-                displacement = np.asarray(face[offset:offset + 2]) - anchor
-                face[offset:offset + 2] = (anchor + horizontal * np.dot(displacement, horizontal) * scale_x
-                                          + vertical * np.dot(displacement, vertical) * scale_y).tolist()
-        body = list(source["pose_keypoints_2d"])
-        for index in (0, 14, 15, 16, 17):
-            offset = index * 3
-            if body[offset + 2] > 0:
-                displacement = np.asarray(body[offset:offset + 2]) - anchor
-                body[offset:offset + 2] = (anchor + horizontal * np.dot(displacement, horizontal) * scale_x
-                                          + vertical * np.dot(displacement, vertical) * scale_y).tolist()
-        person = dict(source)
-        person["face_keypoints_2d"] = face
-        person["pose_keypoints_2d"] = body
-        adjusted.append(person)
-        changed = True
-    adjusted.extend(pose.get("people", [])[len(adjusted):])
-    if not changed:
-        return pose
-    result = dict(pose)
-    result["people"] = adjusted
-    if "face_keypoints" in pose:
-        meta = dict(pose["face_keypoints"])
-        meta["faces"] = [{"keypoints": [face[i:i + 3] for i in range(0, 210, 3) if face[i + 2] > 0]}
-                         for person in adjusted
-                         for face in [person.get("face_keypoints_2d", [])]
-                         if len(face) == 210]
-        result["face_keypoints"] = meta
-    return result

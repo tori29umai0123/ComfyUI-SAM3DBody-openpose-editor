@@ -24,6 +24,14 @@ SAM 3D Body inference to OpenPose-compatible `POSE_KEYPOINT` data.
 
 Load [`workflows/sam3d_body_openpose_example.json`](workflows/sam3d_body_openpose_example.json) in ComfyUI, select an image in `Load Image`, then queue the workflow. It runs Analyze → Render → Save Image. For one body-shape reference, connect another `Load Image` node to Analyze's `body_shape_image` input. For multiple references, chain `SAM3D Body Shape Images (Append)` nodes in person order and connect the last output to Analyze's `body_shape_images` input. Connect Analyze's `body_shape_keypoint` output to Render's matching input. The node uses `models/sam3.1/sam3.1_multiplex_fp16.safetensors` if present and downloads it automatically on first use.
 
+Example OpenPose output:
+
+![OpenPose example](sam3d_body_openpose_example.png)
+
+The five-person workflow in [`workflows/sam3d_body_pose01_chibi01-05.json`](workflows/sam3d_body_pose01_chibi01-05.json) accepts one pose image and five body-shape images, assigned in detected bbox order.
+
+![Five-person body-shape example](sam3d_body_pose01_chibi01-05.png)
+
 ## Models
 
 Analyze looks for these files under ComfyUI's configured models directory and downloads them automatically when missing:

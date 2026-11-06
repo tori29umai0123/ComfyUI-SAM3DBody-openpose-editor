@@ -9,11 +9,6 @@ __pycache__/
 *.safetensors
 *.pt
 /*.png
-/hf_rtmdet_ins_onnx/
+!/sam3d_body_openpose_example.png
+!/sam3d_body_pose01_chibi01-05.png
 /validation/
-
-# Historical working copies; the active implementation is nodes.py.
-/nodes_before_*.py
-/nodes_failed_*.py
-/nodes_rebuild_*.py
-/nodes_restored_*.py
