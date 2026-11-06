@@ -649,7 +649,10 @@
         1,
         true,
         0.5,
-        12
+        12,
+        "sam31_video",
+        16,
+        1
       ],
       "widgets_values_named": {
         "device": "cuda",
@@ -658,7 +661,10 @@
         "confidence": 1,
         "auto_head_proportion": true,
         "person_threshold": 0.5,
-        "max_missing_frames": 12
+        "max_missing_frames": 12,
+        "tracking_mode": "sam31_video",
+        "max_tracked_people": 16,
+        "detect_interval": 1
       }
     },
     {

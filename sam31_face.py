@@ -81,13 +81,11 @@ def _text_embedding(clip, prompt, device, dtype):
     return emb, mask
 
 
-def _run_network(network, frame, embedding, text_mask, threshold, orig_size):
-    """Retry SAM3.1 with PyTorch attention when this xFormers build rejects the GPU."""
+def run_with_attention_fallback(operation):
+    """Retry SAM3.1 inference with PyTorch attention if xFormers rejects this GPU."""
     global _attention_fallback_logged
-    arguments = {"text_embeddings": embedding, "text_mask": text_mask,
-                 "threshold": threshold, "orig_size": orig_size}
     try:
-        return network(frame, **arguments)
+        return operation()
     except NotImplementedError as error:
         if "No operator found for" not in str(error) or "memory_efficient_attention_forward" not in str(error):
             raise
@@ -106,7 +104,13 @@ def _run_network(network, frame, embedding, text_mask, threshold, orig_size):
         if not _attention_fallback_logged:
             print("[SAM3DBodyOpenPose] xFormers cannot run SAM3.1 on this GPU; using PyTorch attention for SAM3.1.")
             _attention_fallback_logged = True
-        return network(frame, **arguments)
+        return operation()
+
+
+def _run_network(network, frame, embedding, text_mask, threshold, orig_size):
+    arguments = {"text_embeddings": embedding, "text_mask": text_mask,
+                 "threshold": threshold, "orig_size": orig_size}
+    return run_with_attention_fallback(lambda: network(frame, **arguments))
 
 
 def _crop_from_anchor(anchor, width, height):
