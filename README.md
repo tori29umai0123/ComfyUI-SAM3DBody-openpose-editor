@@ -43,6 +43,12 @@ The **top row** is the pose input. The **middle row** shows five chibi body-shap
 
 ![Top: pose input. Middle: five chibi body-shape references. Bottom: OpenPose output with the reference proportions.](sam3d_body_pose01_chibi01-05.png)
 
+### Video and body-shape reference example
+
+This animated example shows the video pose input in the top row, body-shape references in the middle row, and the tracked OpenPose output in the bottom row. The GIF plays at 5 fps. The leftmost person's body proportions are changed using the chibi reference. The same reference remains assigned to that person across frames as positions change. Load [`workflows/sam3d_body_pose01_chibi01_Video.json`](workflows/sam3d_body_pose01_chibi01_Video.json) and select your own video and reference images in its loader nodes.
+
+![Video example: pose frames above, body-shape references in the middle, and tracked OpenPose output below with the leftmost person changed to chibi proportions.](sam3d_body_pose01_chibi01_Video.gif)
+
 ## Models
 
 Analyze looks for these files under ComfyUI's configured models directory and downloads them automatically when missing:
