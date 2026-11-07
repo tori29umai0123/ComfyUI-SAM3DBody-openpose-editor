@@ -27,6 +27,8 @@ SAM 3D Body inference to OpenPose-compatible `POSE_KEYPOINT` data.
 `pose_keypoint` uses COCO-18 body order plus OpenPose 21-point hands.
 `body_shape_keypoint` includes the same OpenPose structure plus raw SAM3DBody MHR70 / 3D / parameter data for downstream retargeting.
 
+Render uses the bundled OpenPose renderer in `vendor/ultimate_openpose/util.py`. No separate OpenPose editor installation is needed. This copy is distributed under GPL v3; see `vendor/ultimate_openpose/LICENSE` and `vendor/ultimate_openpose/README.md` for its source.
+
 ## Sample workflow
 
 Load [`workflows/sam3d_body_openpose_example.json`](workflows/sam3d_body_openpose_example.json) in ComfyUI, select an image in `Load Image`, then queue the workflow. It runs Analyze → Render → Save Image. For one body-shape reference, connect another `Load Image` node to Analyze's `body_shape_images` input. For multiple references, chain `SAM3D Body Shape Images (Append)` nodes in person order and connect the last output to Analyze's `body_shape_images` input. Connect Analyze's `body_shape_keypoint` output to Render's matching input. The node uses `models/sam3.1/sam3.1_multiplex_fp16.safetensors` if present and downloads it automatically on first use.

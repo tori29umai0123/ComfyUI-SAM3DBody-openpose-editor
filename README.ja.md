@@ -25,6 +25,8 @@ SAM3DBodyで画像内の人物の姿勢を推定し、OpenPose互換の `POSE_KE
 
 `pose_keypoint` はCOCO-18の身体キーポイントとOpenPoseの21点の手キーポイントを含みます。`body_shape_keypoint` は同じOpenPose形式に加え、SAM3DBodyのMHR70・3D・パラメータ情報も含みます。
 
+Render は同梱の `vendor/ultimate_openpose/util.py` を使います。別途OpenPoseエディタをインストールする必要はありません。このコピーは GPL v3 に従って配布します。出典は `vendor/ultimate_openpose/README.md`、ライセンス全文は同ディレクトリの `LICENSE` を参照してください。
+
 ## ワークフローと画像例
 
 基本的な使い方は [`workflows/sam3d_body_openpose_example.json`](workflows/sam3d_body_openpose_example.json) をComfyUIで開き、`Load Image` で入力画像を選択して実行します。Analyze → Render → Save Image の順に処理します。体形画像を1枚使う場合は別の `Load Image` をAnalyzeの `body_shape_images` につなぎます。複数枚ならAppendノードを人物の順につなぎ、最後の出力をAnalyzeの `body_shape_images` へ接続します。Analyzeの `body_shape_keypoint` 出力をRenderの同名入力につないでください。

@@ -9,7 +9,7 @@ import torch
 ROOT_DIR = os.path.dirname(os.path.abspath(__file__))
 CUSTOM_NODES_DIR = os.path.dirname(ROOT_DIR)
 LOCAL_SAM3D_DIR = ROOT_DIR
-OPENPOSE_UTIL_PATH = os.path.join(CUSTOM_NODES_DIR, "ComfyUI-ultimate-openpose-editor", "util.py")
+OPENPOSE_UTIL_PATH = os.path.join(ROOT_DIR, "vendor", "ultimate_openpose", "util.py")
 
 try:
     import folder_paths
@@ -272,8 +272,6 @@ def _openpose_util():
     global _OPENPOSE_UTIL
     if _OPENPOSE_UTIL is not None:
         return _OPENPOSE_UTIL
-    if not os.path.exists(OPENPOSE_UTIL_PATH):
-        raise RuntimeError("ComfyUI-ultimate-openpose-editor util.py was not found.")
     spec = importlib.util.spec_from_file_location("sam3dbody_openpose_uope_util", OPENPOSE_UTIL_PATH)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
